@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vet-test:
+    name: Build, vet, and unit test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Build (root module)
+        run: go build ./...
+
+      - name: Vet (root module)
+        run: go vet ./...
+
+      - name: Unit test (root module)
+        run: go test ./...
+
+      - name: Build (plugin module)
+        working-directory: plugin/promhash-datasource
+        run: go build ./...
+
+      - name: Vet (plugin module)
+        working-directory: plugin/promhash-datasource
+        run: go vet ./...
+
+      - name: Unit test (plugin module)
+        working-directory: plugin/promhash-datasource
+        run: go test ./...
+
+  integration:
+    name: Integration test (Neo4j via testcontainers)
+    runs-on: ubuntu-latest
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      # The integration tests use testcontainers to start neo4j:5.23 on
+      # demand against the runner's Docker daemon, which is pre-installed on
+      # ubuntu-latest. Pre-pull the image so the first test does not pay the
+      # full pull cost inside its timeout.
+      - name: Pre-pull Neo4j image
+        run: docker pull neo4j:5.23
+
+      - name: Integration test (root module)
+        run: go test -tags=integration ./...
