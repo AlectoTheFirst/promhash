@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
-	"github.com/starkweb/promhash/internal/enrich"
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/enrich"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 func main() {

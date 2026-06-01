@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 // RuleGroup renders a Prometheus recording-rule group (as YAML) that emits one

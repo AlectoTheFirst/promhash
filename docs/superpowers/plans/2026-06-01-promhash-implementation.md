@@ -14,7 +14,7 @@
 
 ## Shared Contracts (referenced by every task — do not drift)
 
-**Module:** `github.com/starkweb/promhash`
+**Module:** `github.com/AlectoTheFirst/promhash`
 
 **Package layout:**
 ```
@@ -71,7 +71,7 @@ type ImpactRow struct { App, Service, Customer, Owner, Criticality string }
 Run:
 ```bash
 cd /Users/chris/code/ai-code/promhash
-go mod init github.com/starkweb/promhash
+go mod init github.com/AlectoTheFirst/promhash
 printf '/bin/\n*.out\nnode_modules/\nplugin/promhash-datasource/dist/\n' > .gitignore
 ```
 
@@ -352,7 +352,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestEnsureConstraintsIdempotent(t *testing.T) {
     ctx := context.Background()
@@ -425,7 +425,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "time"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "time"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestUpsertAndGetInterface(t *testing.T) {
     ctx := context.Background()
@@ -596,7 +596,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```go
 package catalog
 
-import ( "testing"; "github.com/starkweb/promhash/internal/graph" )
+import ( "testing"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 func cat() []graph.Iface {
     return []graph.Iface{
@@ -642,7 +642,7 @@ Expected: FAIL — `undefined: NewResolver`.
 ```go
 package catalog
 
-import ( "fmt"; "sort"; "strings"; "github.com/starkweb/promhash/internal/graph" )
+import ( "fmt"; "sort"; "strings"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 type NoMatchError struct{ Device, Ref string; Suggestions []string }
 func (e *NoMatchError) Error() string {
@@ -899,8 +899,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 package catalog
 
 import ( "context"; "testing"
-    "github.com/starkweb/promhash/internal/graph"; "github.com/starkweb/promhash/internal/promclient"
-    "github.com/starkweb/promhash/internal/testutil" )
+    "github.com/AlectoTheFirst/promhash/internal/graph"; "github.com/AlectoTheFirst/promhash/internal/promclient"
+    "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestSyncUpsertsInterfaces(t *testing.T) {
     ctx := context.Background()
@@ -927,9 +927,9 @@ package catalog
 
 import (
     "context"; "time"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/phash"
-    "github.com/starkweb/promhash/internal/promclient"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/phash"
+    "github.com/AlectoTheFirst/promhash/internal/promclient"
 )
 
 // ifacePHash is the canonical interface identity (device + canonical ifName).
@@ -988,10 +988,10 @@ package main
 import (
     "context"; "flag"; "log"
     "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-    "github.com/starkweb/promhash/internal/catalog"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/nautobot"
-    "github.com/starkweb/promhash/internal/promclient"
+    "github.com/AlectoTheFirst/promhash/internal/catalog"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/nautobot"
+    "github.com/AlectoTheFirst/promhash/internal/promclient"
 )
 
 func main() {
@@ -1150,7 +1150,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```go
 package declare
 
-import ( "testing"; "github.com/starkweb/promhash/internal/catalog"; "github.com/starkweb/promhash/internal/graph" )
+import ( "testing"; "github.com/AlectoTheFirst/promhash/internal/catalog"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 func resolver() *catalog.Resolver {
     return catalog.NewResolver([]graph.Iface{
@@ -1182,7 +1182,7 @@ Expected: FAIL — `undefined: Validate`.
 ```go
 package declare
 
-import ( "fmt"; "github.com/starkweb/promhash/internal/catalog" )
+import ( "fmt"; "github.com/AlectoTheFirst/promhash/internal/catalog" )
 
 // Validate resolves every hop's (device, if) against the catalog. Returns one
 // error per unresolved/ambiguous reference — the CI gate fails if non-empty.
@@ -1228,8 +1228,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 package declare
 
 import ( "context"; "testing"; "time"
-    "github.com/starkweb/promhash/internal/catalog"; "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/testutil" )
+    "github.com/AlectoTheFirst/promhash/internal/catalog"; "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestLoadCreatesPathHops(t *testing.T) {
     ctx := context.Background()
@@ -1327,9 +1327,9 @@ package declare
 
 import (
     "context"; "fmt"; "time"
-    "github.com/starkweb/promhash/internal/catalog"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/phash"
+    "github.com/AlectoTheFirst/promhash/internal/catalog"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 func appPHash(app string) string    { return phash.Hash(phash.KindApp, app) }
@@ -1461,9 +1461,9 @@ package main
 import (
     "context"; "flag"; "log"; "os"; "path/filepath"; "time"
     "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-    "github.com/starkweb/promhash/internal/catalog"
-    "github.com/starkweb/promhash/internal/declare"
-    "github.com/starkweb/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/catalog"
+    "github.com/AlectoTheFirst/promhash/internal/declare"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func main() {
@@ -1548,7 +1548,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "time"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "time"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestAppPathReturnsOrderedUnion(t *testing.T) {
     ctx := context.Background()
@@ -1623,7 +1623,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```go
 package enrich
 
-import ( "testing"; "github.com/starkweb/promhash/internal/graph" )
+import ( "testing"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 func TestFederationMatch(t *testing.T) {
     hops := []graph.Hop{
@@ -1645,7 +1645,7 @@ Expected: FAIL — `undefined: FederationMatch`.
 ```go
 package enrich
 
-import ( "fmt"; "sort"; "strconv"; "strings"; "github.com/starkweb/promhash/internal/graph" )
+import ( "fmt"; "sort"; "strconv"; "strings"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 func FederationMatch(hops []graph.Hop) string {
     insts, idxs := map[string]struct{}{}, map[string]struct{}{}
@@ -1689,7 +1689,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```go
 package enrich
 
-import ( "os"; "testing"; "github.com/starkweb/promhash/internal/graph" )
+import ( "os"; "testing"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 func TestRuleGroupGolden(t *testing.T) {
     hops := []graph.Hop{
@@ -1712,7 +1712,7 @@ Expected: FAIL — `undefined: RuleGroup`.
 ```go
 package enrich
 
-import ( "fmt"; "strings"; "github.com/starkweb/promhash/internal/graph" )
+import ( "fmt"; "strings"; "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 // RuleGroup emits one recording rule per hop (no cross-candidate-path summation),
 // choosing ifHCIn/OutOctets by hop direction. coverage=declared stamps provenance.
@@ -1773,9 +1773,9 @@ package main
 import (
     "context"; "flag"; "log"; "os"; "path/filepath"; "strings"; "time"
     "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-    "github.com/starkweb/promhash/internal/enrich"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/phash"
+    "github.com/AlectoTheFirst/promhash/internal/enrich"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 func main() {
@@ -1939,7 +1939,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "time"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "time"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestInterfaceImpact(t *testing.T) {
     ctx := context.Background()
@@ -2007,7 +2007,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 package api
 
 import ( "context"; "encoding/json"; "net/http"; "net/http/httptest"; "testing"; "time"
-    "github.com/starkweb/promhash/internal/graph" )
+    "github.com/AlectoTheFirst/promhash/internal/graph" )
 
 type fakeRepo struct{}
 func (fakeRepo) AppPath(_ context.Context, app string, _ time.Time) ([]graph.Hop, error) {
@@ -2042,8 +2042,8 @@ package api
 
 import (
     "context"; "encoding/json"; "net/http"; "strconv"; "time"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/phash"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 type Repo interface {
@@ -2126,7 +2126,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestListApps(t *testing.T) {
     ctx := context.Background()
@@ -2166,8 +2166,8 @@ package main
 import (
     "context"; "flag"; "log"; "net/http"
     "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-    "github.com/starkweb/promhash/internal/api"
-    "github.com/starkweb/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/api"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func main() {
@@ -2292,7 +2292,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 //go:build integration
 package graph
 
-import ( "context"; "testing"; "github.com/starkweb/promhash/internal/testutil" )
+import ( "context"; "testing"; "github.com/AlectoTheFirst/promhash/internal/testutil" )
 
 func TestUpsertAppSeed(t *testing.T) {
     ctx := context.Background()
@@ -2329,9 +2329,9 @@ package main
 import (
     "context"; "flag"; "log"
     "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-    "github.com/starkweb/promhash/internal/graph"
-    "github.com/starkweb/promhash/internal/phash"
-    "github.com/starkweb/promhash/internal/servicenow"
+    "github.com/AlectoTheFirst/promhash/internal/graph"
+    "github.com/AlectoTheFirst/promhash/internal/phash"
+    "github.com/AlectoTheFirst/promhash/internal/servicenow"
 )
 
 func main() {
@@ -2385,7 +2385,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ```bash
 cd plugin/promhash-datasource
-go mod init github.com/starkweb/promhash-datasource
+go mod init github.com/AlectoTheFirst/promhash-datasource
 go get github.com/grafana/grafana-plugin-sdk-go
 ```
 
@@ -2394,7 +2394,7 @@ go get github.com/grafana/grafana-plugin-sdk-go
 {
   "type": "datasource",
   "name": "promhash",
-  "id": "starkweb-promhash-datasource",
+  "id": "alectothefirst-promhash-datasource",
   "backend": true,
   "executable": "gpx_promhash",
   "info": { "description": "Query the promhash application-path graph", "version": "0.1.0" },
@@ -2676,11 +2676,11 @@ import (
     "github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
     "github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
     "github.com/grafana/grafana-plugin-sdk-go/backend/log"
-    "github.com/starkweb/promhash-datasource/pkg/plugin"
+    "github.com/AlectoTheFirst/promhash-datasource/pkg/plugin"
 )
 
 func main() {
-    if err := datasource.Manage("starkweb-promhash-datasource", newInstance, datasource.ManageOpts{}); err != nil {
+    if err := datasource.Manage("alectothefirst-promhash-datasource", newInstance, datasource.ManageOpts{}); err != nil {
         log.DefaultLogger.Error(err.Error()); os.Exit(1)
     }
 }

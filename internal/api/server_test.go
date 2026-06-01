@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 type fakeRepo struct{}

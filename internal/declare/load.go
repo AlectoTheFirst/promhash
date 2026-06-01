@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/starkweb/promhash/internal/catalog"
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 func appPHash(app string) string    { return phash.Hash(phash.KindApp, app) }

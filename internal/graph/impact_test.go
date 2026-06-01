@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starkweb/promhash/internal/testutil"
+	"github.com/AlectoTheFirst/promhash/internal/testutil"
 )
 
 func TestInterfaceImpact(t *testing.T) {

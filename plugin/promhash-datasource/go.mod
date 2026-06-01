@@ -1,4 +1,4 @@
-module github.com/starkweb/promhash-datasource
+module github.com/AlectoTheFirst/promhash-datasource
 
 go 1.26.3
 

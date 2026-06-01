@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/phash"
-	"github.com/starkweb/promhash/internal/promclient"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/promclient"
 )
 
 // ifacePHash is the canonical interface identity (device + canonical ifName).

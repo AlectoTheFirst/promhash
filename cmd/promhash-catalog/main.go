@@ -7,10 +7,10 @@ import (
 	"os"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
-	"github.com/starkweb/promhash/internal/catalog"
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/nautobot"
-	"github.com/starkweb/promhash/internal/promclient"
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/nautobot"
+	"github.com/AlectoTheFirst/promhash/internal/promclient"
 )
 
 func main() {

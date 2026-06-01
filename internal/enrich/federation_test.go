@@ -3,7 +3,7 @@ package enrich
 import (
 	"testing"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func TestFederationMatch(t *testing.T) {

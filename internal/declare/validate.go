@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/starkweb/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
 )
 
 // validDirections is the closed set of traffic directions a hop may declare.

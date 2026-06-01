@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 // Repo is the data source the Server queries to answer requests. It abstracts

@@ -3,8 +3,8 @@ package declare
 import (
 	"testing"
 
-	"github.com/starkweb/promhash/internal/catalog"
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func resolver() *catalog.Resolver {

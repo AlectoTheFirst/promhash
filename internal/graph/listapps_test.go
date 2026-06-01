@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/starkweb/promhash/internal/testutil"
+	"github.com/AlectoTheFirst/promhash/internal/testutil"
 )
 
 func TestListApps(t *testing.T) {

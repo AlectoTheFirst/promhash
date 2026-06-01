@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func TestRuleGroupGolden(t *testing.T) {

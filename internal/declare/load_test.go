@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starkweb/promhash/internal/catalog"
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/testutil"
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/testutil"
 )
 
 func TestLoadCreatesPathHops(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 func errorsAs(err error, target any) bool {

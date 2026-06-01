@@ -35,7 +35,7 @@ npx tsc --noEmit   # type-check only (smoke)
 
 ## Signing
 
-The plugin id is `starkweb-promhash-datasource`. Grafana requires plugins to be signed.
+The plugin id is `alectothefirst-promhash-datasource`. Grafana requires plugins to be signed.
 Choose one:
 
 - **Private signing (Grafana Enterprise):** sign the built `dist/` with a private signature
@@ -46,10 +46,10 @@ Choose one:
 
   ```ini
   [plugins]
-  allow_loading_unsigned_plugins = starkweb-promhash-datasource
+  allow_loading_unsigned_plugins = alectothefirst-promhash-datasource
   ```
 
-  or via env: `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=starkweb-promhash-datasource`.
+  or via env: `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=alectothefirst-promhash-datasource`.
 
 ## Deploy
 

@@ -9,11 +9,11 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
-	"github.com/starkweb/promhash-datasource/pkg/plugin"
+	"github.com/AlectoTheFirst/promhash-datasource/pkg/plugin"
 )
 
 func main() {
-	if err := datasource.Manage("starkweb-promhash-datasource", newInstance, datasource.ManageOpts{}); err != nil {
+	if err := datasource.Manage("alectothefirst-promhash-datasource", newInstance, datasource.ManageOpts{}); err != nil {
 		log.DefaultLogger.Error(err.Error())
 		os.Exit(1)
 	}

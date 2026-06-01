@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
-	"github.com/starkweb/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 // declaredConfidence is the confidence stamped on relationships created from a

@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 // FederationMatch builds a Prometheus /federate match[] selector that captures

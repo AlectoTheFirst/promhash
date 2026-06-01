@@ -1,4 +1,4 @@
-module github.com/starkweb/promhash
+module github.com/AlectoTheFirst/promhash
 
 go 1.26.3
 

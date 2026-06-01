@@ -7,9 +7,9 @@ import (
 	"os"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/phash"
-	"github.com/starkweb/promhash/internal/servicenow"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
+	"github.com/AlectoTheFirst/promhash/internal/servicenow"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/starkweb/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
 // NoMatchError reports that no interface on the device matched the requested

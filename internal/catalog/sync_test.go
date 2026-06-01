@@ -6,9 +6,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/starkweb/promhash/internal/graph"
-	"github.com/starkweb/promhash/internal/promclient"
-	"github.com/starkweb/promhash/internal/testutil"
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/promclient"
+	"github.com/AlectoTheFirst/promhash/internal/testutil"
 )
 
 func TestSyncUpsertsInterfaces(t *testing.T) {
