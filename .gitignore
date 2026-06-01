@@ -1,0 +1,4 @@
+/bin/
+*.out
+node_modules/
+plugin/promhash-datasource/dist/
