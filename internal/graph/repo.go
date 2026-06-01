@@ -31,3 +31,50 @@ func (r *Repo) EnsureConstraints(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (r *Repo) UpsertInterface(ctx context.Context, i Iface) error {
+	return r.write(ctx,
+		`MERGE (n:Interface {phash:$phash})
+         SET n.device=$device, n.ifName=$ifName, n.metricIfName=$metricIfName,
+             n.ifDescr=$ifDescr, n.ifAlias=$ifAlias, n.instance=$instance,
+             n.vendor=$vendor, n.ifIndex=$ifIndex, n.observedAt=$observedAt, n.provenance='observed'`,
+		map[string]any{"phash": i.PHash, "device": i.Device, "ifName": i.IfName,
+			"metricIfName": i.MetricIfName, "ifDescr": i.IfDescr, "ifAlias": i.IfAlias,
+			"instance": i.Instance, "vendor": i.Vendor, "ifIndex": i.IfIndex,
+			"observedAt": i.ObservedAt.Unix()})
+}
+
+func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (n:Interface {phash:$phash}) RETURN n`, map[string]any{"phash": phash},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return Iface{}, err
+	}
+	if len(res.Records) == 0 {
+		return Iface{}, ErrNotFound
+	}
+	n, _ := res.Records[0].Get("n")
+	props := n.(neo4j.Node).Props
+	return ifaceFromProps(props), nil
+}
+
+var ErrNotFound = fmt.Errorf("graph: node not found")
+
+func ifaceFromProps(p map[string]any) Iface {
+	gs := func(k string) string {
+		if v, ok := p[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	gi := func(k string) int {
+		if v, ok := p[k].(int64); ok {
+			return int(v)
+		}
+		return 0
+	}
+	return Iface{PHash: gs("phash"), Device: gs("device"), IfName: gs("ifName"),
+		MetricIfName: gs("metricIfName"), IfDescr: gs("ifDescr"), IfAlias: gs("ifAlias"),
+		Instance: gs("instance"), Vendor: gs("vendor"), IfIndex: gi("ifIndex")}
+}
