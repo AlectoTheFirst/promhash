@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
@@ -77,4 +78,28 @@ func ifaceFromProps(p map[string]any) Iface {
 	return Iface{PHash: gs("phash"), Device: gs("device"), IfName: gs("ifName"),
 		MetricIfName: gs("metricIfName"), IfDescr: gs("ifDescr"), IfAlias: gs("ifAlias"),
 		Instance: gs("instance"), Vendor: gs("vendor"), IfIndex: gi("ifIndex")}
+}
+
+func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Hop, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (a:Application {phash:$app})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[:USES]->(c:Connection)-[t:TAKES]->(p:Path)-[h:HOP]->(i:Interface)
+         WHERE ($at >= t.validFrom) AND (t.validTo IS NULL OR $at < t.validTo)
+         RETURN DISTINCT i.device AS device, i.ifName AS ifName, i.metricIfName AS metricIfName,
+                i.instance AS instance, i.ifIndex AS ifIndex, h.seq AS seq, h.direction AS direction
+         ORDER BY seq`,
+		map[string]any{"app": appPHash, "at": at.Unix()},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Hop, 0, len(res.Records))
+	for _, rec := range res.Records {
+		gs := func(k string) string { v, _ := rec.Get(k); s, _ := v.(string); return s }
+		gi := func(k string) int { v, _ := rec.Get(k); n, _ := v.(int64); return int(n) }
+		out = append(out, Hop{Device: gs("device"), IfName: gs("ifName"), MetricIfName: gs("metricIfName"),
+			Instance: gs("instance"), IfIndex: gi("ifIndex"), Seq: gi("seq"), Direction: gs("direction"),
+			Provenance: "declared"})
+	}
+	return out, nil
 }
