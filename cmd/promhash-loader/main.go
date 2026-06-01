@@ -1,0 +1,68 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/starkweb/promhash/internal/catalog"
+	"github.com/starkweb/promhash/internal/declare"
+	"github.com/starkweb/promhash/internal/graph"
+)
+
+func main() {
+	var dir, neoURL, neoUser, neoPass, sha string
+	var validateOnly bool
+	flag.StringVar(&dir, "dir", "declared", "directory of *.yaml declarations")
+	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
+	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
+	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&sha, "source", "manual", "git sha for provenance")
+	flag.BoolVar(&validateOnly, "validate-only", false, "CI gate: validate, do not write")
+	flag.Parse()
+	ctx := context.Background()
+	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer drv.Close(ctx)
+	r := graph.New(drv, "neo4j")
+	cat, err := r.ListAllInterfaces(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	res := catalog.NewResolver(cat)
+	files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	now := time.Now().UTC()
+	var failed bool
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		a, err := declare.Parse(b)
+		if err != nil {
+			log.Printf("%s: parse: %v", f, err)
+			failed = true
+			continue
+		}
+		if errs := declare.Validate(a, res); len(errs) != 0 {
+			for _, e := range errs {
+				log.Printf("%s: %v", f, e)
+			}
+			failed = true
+			continue
+		}
+		if !validateOnly {
+			if err := declare.Load(ctx, r, a, res, sha, now); err != nil {
+				log.Printf("%s: load: %v", f, err)
+				failed = true
+			}
+		}
+	}
+	if failed {
+		os.Exit(1)
+	}
+	log.Printf("processed %d declarations (validateOnly=%v)", len(files), validateOnly)
+}

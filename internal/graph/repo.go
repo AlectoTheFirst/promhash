@@ -60,6 +60,20 @@ func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, er
 	return ifaceFromProps(props), nil
 }
 
+func (r *Repo) ListAllInterfaces(ctx context.Context) ([]Iface, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv, `MATCH (n:Interface) RETURN n`, nil,
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Iface, 0, len(res.Records))
+	for _, rec := range res.Records {
+		n, _ := rec.Get("n")
+		out = append(out, ifaceFromProps(n.(neo4j.Node).Props))
+	}
+	return out, nil
+}
+
 var ErrNotFound = fmt.Errorf("graph: node not found")
 
 func ifaceFromProps(p map[string]any) Iface {
