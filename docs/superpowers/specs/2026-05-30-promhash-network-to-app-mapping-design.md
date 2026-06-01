@@ -49,11 +49,15 @@ that uses it (duplicated across a small curated set), never as a multi-valued la
   east-west dependency, CSDM-aligned business layer, stable interface identity, and
   first-class **provenance + temporal validity** on every fact.
 - Manual/declared path data, authored as **YAML-in-git**, synced into the graph.
+- A **normalization/resolution layer** so declarations reference interfaces in human terms
+  (any of `ifName`/`ifDescr`/`ifAlias`, any vendor syntax), validated against real metrics.
+- Support for **multiple candidate paths** per dependency (ECMP / multihop / alternates)
+  without requiring active/standby/weight at declaration time.
 - An **enrichment process** that, for a **curated** set of apps, generates federation
   selectors + recording-rule groups as GitOps artifacts.
 - Per-curated-app federation/tenant that re-exposes app-labeled series.
-- A **consumption API** answering app-path-health and impact for *all* apps (including the
-  flow-blind edge), consumed by Grafana.
+- A **promhash API service** answering app-path-health and impact for *all* apps (including
+  the flow-blind edge), surfaced through a first-class **Grafana datasource plugin**.
 
 **Non-Goals (explicitly out of v1)**
 - Automated flow-based path discovery (Scrutinizer ingestion).
@@ -81,10 +85,11 @@ that uses it (duplicated across a small curated set), never as a multi-valued la
 ## 5. Architecture
 
 ```
-  Nautobot (topology/IPAM) ─┐  one-shot seed import (typed nodes, not paths)
-  ServiceNow (app→CI→IP)    ├─────────────────────────┐
-                            │                          ▼
-  declared paths (YAML in git) ──loader──►  ┌───────────────────────┐
+  Nautobot (topology/IPAM) ─┐  seed import + device↔instance map
+  ServiceNow (app→CI→IP)    ├──────────────────────────┐
+  Prometheus iface-info ────┘  catalog sync (C9: real ifName/ifDescr/ifAlias/ifIndex)
+                            │                           ▼
+  declared paths (YAML in git) ──loader (C4, CI-validated by C9)──►  ┌───────────────────────┐
                                             │  promhash graph (Neo4j)│
                                             │  CSDM business layer,  │
                                             │  reified Connection/   │
@@ -99,7 +104,7 @@ that uses it (duplicated across a small curated set), never as a multi-valued la
                 • federation match[]              GET /interfaces/{d}/{i}/apps        │
                 • recording-rule group            GET /impact?...                     │
                          │                                ▼                           │
-                         ▼                         Grafana (Infinity/JSON):           │
+                         ▼                         Grafana promhash plugin:           │
    main infra Prometheus ──federate slice──►       path-health panels, template      │
      (app-free, bounded)        per-app tenant      vars, alert enrichment            │
                                 (app-labeled, tiny) ──remote_write──► cloud LTS ◄─────┘
@@ -133,15 +138,22 @@ is declared or rolled up from realizing Connections.
 
 **Layer C — Physical path (ordered, the anchor).**
 ```
-(:Connection)-[:TAKES]->(:Path)                         // Path reified → shareable / redundant
+(:Connection)-[:TAKES {provenance,confidence,valid_from,valid_to,source}]->(:Path)  // 1..N CANDIDATE paths
 (:Path)-[:HOP {seq, direction}]->(:Interface)           // ORDERED hops; direction ingress|egress|transit
 (:Interface)-[:ON]->(:Device)
 (:Interface)-[:MEMBER_OF]->(:Segment)                   // SVI/trunk where relevant
 (:IP)-[:ASSIGNED_TO]->(:Interface)
 ```
-`Interface` is keyed by **`(device_phash, ifName)`** — stable across reboot/reconfig.
-**`ifIndex` is a time-varying *attribute*, never the key**; the enrichment generator resolves
-the current `ifIndex` at generation time.
+A `Connection` may `TAKES` **multiple candidate Paths** (ECMP / multihop / alternates). At
+declaration time you do **not** know which is active, standby, or its weight — those are
+runtime facts. The declared model holds only the *candidate set*; `role`/`weight`/active are
+derived later from flow (a `provenance=flow` overlay on `TAKES`), never declared.
+
+`Interface` is keyed by **`(device_phash, canonical_ifName)`** — stable across reboot/reconfig.
+It carries the **resolved metric attributes** from the catalog (C9):
+`{instance, ifIndex, ifName, ifDescr, ifAlias, vendor, observed_at}`. **`ifIndex` is a
+time-varying attribute, never the key**; C5 reads the *current* value from the catalog at
+generation time.
 
 **Cross-cutting fact properties** (on every mutable edge/node — `DEPENDS_ON`, `Connection`,
 `Path`, `HOP`, `EXPOSES/USES`, `MEMBER_OF`, `ASSIGNED_TO`):
@@ -158,7 +170,8 @@ the current `ifIndex` at generation time.
 - **Interface:** `phash(entity_type, canonical_keys) -> stable id`. Pure, deterministic.
   Canonicalization per type:
   - `Device`: serial → hostname → nautobot-id (first available, normalized).
-  - `Interface`: `(device_phash, normalize(ifName))`.
+  - `Interface`: `(device_phash, canonical_ifName)` — canonicalization owned by the catalog
+    (C9), which normalizes vendor syntax and binds the real Prometheus label values.
   - `IP`: normalized address + VRF/tenant scope.
   - `Endpoint`: `(ip_phash, port, proto)`.
   - `ApplicationService` / `Application`: CI sys_id → canonical name.
@@ -181,28 +194,41 @@ the current `ifIndex` at generation time.
   ```yaml
   app: payments
   runs_as: payments-api
-  consumed_by_customers: [acme, globex]      # → Customer / BusinessService / REALIZED_BY
-  depends_on: [ledger-api, auth-api]          # → DEPENDS_ON (east-west)
-  paths:                                       # → Path + ordered HOPs
-    - to: ledger-api
-      hops:
-        - {device: rtr-core-1, ifName: Te0/1/2, direction: egress}
-        - {device: rtr-core-2, ifName: Te0/2/1, direction: transit}
   owner: team-payments
+  consumed_by_customers: [acme, globex]      # → Customer / BusinessService / REALIZED_BY
+  depends_on:                                 # → DEPENDS_ON + Connection + candidate Paths
+    - to: ledger-api
+      paths:                                  # candidate set — NO active/backup, NO weight
+        - hops:
+            - {device: rtr-acc-fra-1, if: Te0/1/2,            direction: egress}
+            - {device: rtr-core-1,    if: "uplink-ledger-dc", direction: transit}  # by ifAlias
+            - {device: rtr-dc-ledger, if: Te1/0/4,            direction: ingress}
+        - hops:                               # alternate / ECMP-member candidate
+            - {device: rtr-acc-fra-1, if: Te0/1/2, direction: egress}
+            - {device: rtr-core-2,    if: Te0/2/1, direction: transit}
+            - {device: rtr-dc-ledger, if: Te1/0/4, direction: ingress}
   ```
-  Removal from YAML closes the edge's validity interval (`valid_to=<commit time>`), never a
+  `if:` is a *human* reference resolved by the catalog (C9) against `ifName | ifDescr |
+  ifAlias` — operators need not know the exact Prometheus label syntax. Single `path:` is
+  sugar for a one-candidate `paths:` list.
+- **CI validation gate:** on PR the loader resolves every `if:` and `device:` via C9.
+  Unresolved or ambiguous → **CI fails** with a "did you mean […]" suggestion list, so bad
+  declarations never reach the graph.
+- Removal from YAML closes the edge's validity interval (`valid_to=<commit time>`), never a
   hard delete — preserves point-in-time history.
-- **Dependencies:** C1, C2, git.
+- **Dependencies:** C1, C2, C9, git.
 
 ### C5 — Enrichment generator (graph → GitOps artifacts)
 - **Purpose:** for each **curated** app, materialize its current interface set and emit deploy
   artifacts. The mechanical half, once the graph knows the path.
-- **Interface:** runs the app-path-health traversal (§7), resolves each `Interface` to its
-  *current* `ifIndex`, then writes two artifacts per app into a git repo:
+- **Interface:** runs the app-path-health traversal (§7) — interface set = **union of all
+  candidate Paths** — reads each `Interface`'s *current* `ifIndex` + `instance` from the
+  catalog (C9), then writes two artifacts per app into a git repo:
   - **federation `match[]`** selecting that app's series, e.g.
-    `{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"rtr-core-1|rtr-core-2", ifIndex=~"42|43"}`
+    `{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"10.0.0.1|10.0.0.2", ifIndex=~"42|43"}`
   - **recording-rule group**, direction-aware (HOP `direction` → `ifHCInOctets` vs
-    `ifHCOutOctets`), e.g.
+    `ifHCOutOctets`), **per-interface/per-hop** (no cross-candidate-path summation — that would
+    double-count and needs weights from flow), e.g.
     ```yaml
     groups:
     - name: promhash_payments
@@ -211,8 +237,8 @@ the current `ifIndex` at generation time.
         expr: rate(ifHCOutOctets{job="promhash-fed-payments"}[5m])
         labels: { app: payments, service: payments-api, coverage: declared }
     ```
-- **Dependencies:** C1, git, curated-app allowlist (config), `ifName→ifIndex` resolution
-  (Nautobot or an SNMP ifName/ifIndex map).
+- **Dependencies:** C1, C9 (catalog → current `ifIndex`/`instance`), git, curated-app
+  allowlist (config).
 
 ### C6 — Per-app federation/tenant (GitOps deploy)
 - **Purpose:** run the generated artifacts. Each curated app = a logical tenant / rule
@@ -222,17 +248,55 @@ the current `ifIndex` at generation time.
   config delivered by existing GitOps tooling.
 - **Dependencies:** C5 artifacts, main infra Prometheus, cloud LTS.
 
-### C7 — Consumption API + Grafana integration
-- **Purpose:** serve the graph to humans and alerting for *all* apps, including flow-blind
-  edge, at zero cardinality cost.
+### C7 — promhash API service (graph query surface)
+- **Purpose:** single server-side surface over the graph for *all* consumers (Grafana plugin,
+  Alertmanager enrichment, future CMDB sync), at zero cardinality cost. Keeps Cypher/graph
+  logic in one place.
 - **Interface (REST, Cypher-backed):**
+  - `GET /apps` → app list (variable population)
   - `GET /apps/{app}/path` → ordered `[{device, ifName, ifIndex, direction, provenance, confidence}]`
   - `GET /interfaces/{device}/{ifName}/apps` → impacted apps / services / customers
   - `GET /impact?device=&ifName=&at=<ts>` → blast radius at a point in time (apps, owners,
     customers, criticality)
-  - Grafana Infinity/JSON datasource consumes these for template variables, path-health
-    panels, and alert-notification enrichment.
 - **Dependencies:** C1.
+
+### C8 — Grafana datasource plugin (promhash)
+- **Purpose:** first-class Grafana datasource for the graph — proper query editor, variable
+  queries, and alerting. Replaces any Infinity/JSON-datasource approach.
+- **Type:** backend plugin (`grafana-plugin-sdk-go`, Go backend + React config/editor). A
+  **thin adapter over the C7 API** — it does NOT talk to Neo4j directly, so graph logic stays
+  server-side and the plugin lifecycle is decoupled from the DB schema.
+- **Interface:**
+  - `QueryData` — query types `app_path`, `impact`, `interface_apps` → Grafana data frames.
+  - `CallResource` — variable / autocomplete queries: `apps()`, `path_interfaces($app)`.
+  - `CheckHealth` — verifies the C7 API is reachable.
+  - Frontend config: promhash API URL + auth token.
+- **Consumption pattern (unchanged zero-cardinality trick):** for graph-only apps, a
+  `path_interfaces($app)` variable scopes a normal **Prometheus** PromQL panel
+  (`ifHCOutOctets{instance=~"$device",ifIndex=~"$ifIndex"}`). The plugin supplies *which*
+  series; Prometheus supplies the values. Curated apps skip the plugin entirely (native
+  `sum by(app)` on their `app:…` series in the LTS).
+- **Distribution:** built + **privately signed** for the org (Grafana Enterprise requires a
+  signature or an unsigned-allowlist entry), deployed via GitOps.
+- **Dependencies:** C7.
+
+### C9 — Interface catalog + resolver (normalization layer)
+- **Purpose:** bridge *human* interface references → the **exact** Prometheus label values, so
+  declarations need not know vendor syntax (`Gi0/3` vs `GigabitEthernet0/3` vs `ge-0/0/3` vs
+  `Ethernet3`), which label (`ifName`/`ifDescr`/`ifAlias`/`ifIndex`), or `device→instance`.
+- **Catalog sync (ground truth = the metrics themselves):** periodically harvest the real
+  interface inventory from Prometheus —
+  `group by (instance, ifIndex, ifName, ifDescr, ifAlias) (ifHCInOctets)` — joined with
+  Nautobot's `device↔instance` map. Upsert `Interface` nodes (`phash` on
+  `device + canonical_ifName`) with `provenance=observed` and `observed_at`. This is exactly
+  the set `match[]` must select, so matching is against reality.
+- **Matcher:** canonicalize the human ref via per-vendor abbreviation rules
+  (`Gi↔GigabitEthernet`, `Te↔TenGigE`, `ge-↔…`, strip case/space) → match against
+  `ifName | ifDescr | ifAlias` → resolve to **exactly one** catalog node. Ambiguity or
+  no-match → **fail loud** (never guess); surfaced to C4 as a CI error with suggestions.
+- **Two call sites:** C4 (PR/CI validation of every `if:`/`device:`) and C5 (read *current*
+  `ifIndex`/`instance` at generation — no stale ifIndex).
+- **Dependencies:** Prometheus query API, Nautobot, C1, C2.
 
 ## 7. Data Flow
 
@@ -244,8 +308,8 @@ WHERE c.valid_to IS NULL
 MATCH (c)-[:TAKES]->(:Path)-[h:HOP]->(i:Interface)-[:ON]->(d:Device)
 RETURN DISTINCT d.name, i.ifName, h.seq, h.direction ORDER BY h.seq
 ```
-`DISTINCT` interface set → federation `match[]`; `h.direction` → in/out metric selection.
-Reverse the same edges → impact/blast-radius.
+`DISTINCT` over **all candidate Paths** → union interface set → federation `match[]`;
+`h.direction` → in/out metric selection. Reverse the same edges → impact/blast-radius.
 
 **Curated app (e.g. payments):**
 1. Owner declares path in YAML → PR → merge → C4 syncs Connection/Path/Hop edges with
@@ -258,9 +322,10 @@ Reverse the same edges → impact/blast-radius.
 
 **Graph-only app (flow-blind edge, not curated):**
 1. Path declared/seeded the same way.
-2. No per-app series generated. Grafana path-health panel resolves `app → ordered interfaces`
-   via C7, then queries the **raw** infra metrics filtered to that set; impact alerting calls
-   `/impact` on interface-down. No new cardinality.
+2. No per-app series generated. The Grafana promhash plugin (C8) resolves `app → ordered
+   interfaces` via the C7 API into a variable, then a Prometheus panel queries the **raw**
+   infra metrics scoped to that set; impact alerting calls `/impact` on interface-down. No
+   new cardinality.
 
 ## 8. Cardinality Analysis
 
@@ -288,8 +353,14 @@ Reverse the same edges → impact/blast-radius.
   returns an explicit "no path known" marker, never an empty success that reads as "no impact".
 - **Conflicting edges:** declared wins in v1 (only source). When flow/topology arrive,
   precedence = highest confidence, ties broken `flow > topology > declared`; conflicts logged.
-- **Unstable ifIndex:** graph keys on `ifName`; ifIndex resolved at generation time, so a
-  renumber regenerates rules rather than silently mislabeling. Resolution miss = loud failure.
+- **Unstable ifIndex / naming:** graph keys on `canonical_ifName`; the C9 catalog holds the
+  real metric labels + current `ifIndex` (refreshed from live metrics), so a renumber/rename
+  regenerates rules rather than silently mislabeling.
+- **Ambiguous interface ref:** a declared `if:` matching zero or multiple catalog interfaces
+  fails the C4 CI gate with suggestions — never a silent guess.
+- **Candidate paths (ECMP/alternates):** with no active/weight known at declaration, impact is
+  "interface is on *one of* the app's candidate paths → **potential** impact"; active-vs-
+  redundant grading waits for flow (Layer 2).
 - **Federation source load:** `match[]` is graph-scoped to path interfaces only, bounding
   `/federate` cost; monitor source-instance load.
 - **Identity collisions:** `phash` canonicalization is the risk surface; collisions fail loud
@@ -300,8 +371,12 @@ Reverse the same edges → impact/blast-radius.
 - C2 `phash`: table-driven canonicalization + collision tests per entity type.
 - C4 loader: YAML → graph upsert/retract (validity-close) round-trips against ephemeral Neo4j.
 - C5 generator: golden-file tests — fixture graph → expected federation `match[]` +
-  direction-aware rule-group YAML; ifIndex-resolution cases.
+  direction-aware rule-group YAML; candidate-path union; no cross-path summation.
+- C9 resolver: per-vendor canonicalization + match (`ifName`/`ifDescr`/`ifAlias`) +
+  ambiguity/no-match-fail cases against a catalog fixture.
 - C7 API: contract tests over a seeded graph (path order, impact, point-in-time `at`).
+- C8 plugin: backend `QueryData`/`CallResource`/`CheckHealth` unit tests against a mock C7
+  API; frontend query-editor + variable-query smoke.
 - End-to-end smoke: declare a fixture app → generate → load rules into a throwaway Prometheus
   → assert app-labeled series appear.
 
@@ -309,8 +384,9 @@ Reverse the same edges → impact/blast-radius.
 
 - **Layer 2 attribution:** ingest Scrutinizer NetFlow (core) + firewall bytes (boundaries),
   attach byte-shares to existing `Connection`/`Path` nodes, split interface bytes across apps;
-  emit curated `app:net_bytes:rate` with honest `coverage`. The reified model already supports
-  this with no remodel.
+  emit curated `app:net_bytes:rate` with honest `coverage`. Flow also writes the observed
+  **active-path / weight** overlay onto `TAKES` (`provenance=flow`) — filling what declaration
+  cannot. The reified model already supports this with no remodel.
 - **Automated path discovery:** flow-observed (core) and topology/routing-computed (Nautobot)
   HOP edges added with their own provenance.
 - **Chargeback / per-customer** quantitative views once attribution exists.
@@ -321,4 +397,6 @@ Reverse the same edges → impact/blast-radius.
 - Curated-app allowlist governance: who decides an app graduates to per-app series?
 - Federation vs remote_read for the slice (default: federation).
 - Where per-app tenants physically run vs the cloud LTS tenancy model.
-- `ifName → ifIndex` resolution source of truth (Nautobot vs live SNMP walk).
+- Catalog sync cadence (C9) + authority when the Prometheus harvest and Nautobot disagree on
+  an interface.
+- Grafana plugin signing path for Enterprise: private org signature vs unsigned-allowlist.
