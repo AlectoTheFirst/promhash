@@ -24,12 +24,18 @@ func main() {
 	flag.StringVar(&sha, "source", "manual", "git sha for provenance")
 	flag.BoolVar(&validateOnly, "validate-only", false, "CI gate: validate, do not write")
 	flag.Parse()
+	if neoPass == "" {
+		neoPass = os.Getenv("NEO4J_PASS")
+	}
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer drv.Close(ctx)
+	if err := drv.VerifyConnectivity(ctx); err != nil {
+		log.Fatal(err)
+	}
 	r := graph.New(drv, "neo4j")
 	cat, err := r.ListAllInterfaces(ctx)
 	if err != nil {
@@ -40,7 +46,12 @@ func main() {
 	now := time.Now().UTC()
 	var failed bool
 	for _, f := range files {
-		b, _ := os.ReadFile(f)
+		b, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("%s: read: %v", f, err)
+			failed = true
+			continue
+		}
 		a, err := declare.Parse(b)
 		if err != nil {
 			log.Printf("%s: parse: %v", f, err)

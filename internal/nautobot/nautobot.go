@@ -6,10 +6,16 @@ package nautobot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// maxBodyBytes caps the response body read from Nautobot to guard against
+// an unexpectedly large or hostile payload exhausting memory.
+const maxBodyBytes = 16 << 20
 
 // Client talks to a Nautobot REST API using a base URL and an optional
 // API token for authentication.
@@ -37,7 +43,10 @@ type deviceList struct {
 
 // DeviceInstanceMap returns device name -> management IP (the Prometheus `instance` host).
 func (c *Client) DeviceInstanceMap(ctx context.Context) (map[string]string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/dcim/devices/?limit=0", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/dcim/devices/?limit=0", nil)
+	if err != nil {
+		return nil, err
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Token "+c.token)
 	}
@@ -46,8 +55,11 @@ func (c *Client) DeviceInstanceMap(ctx context.Context) (map[string]string, erro
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("nautobot: status %d", resp.StatusCode)
+	}
 	var dl deviceList
-	if err := json.NewDecoder(resp.Body).Decode(&dl); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&dl); err != nil {
 		return nil, err
 	}
 	out := map[string]string{}

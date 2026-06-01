@@ -23,12 +23,18 @@ func main() {
 	flag.StringVar(&outDir, "out", "gitops/enrichment", "output dir for artifacts")
 	flag.StringVar(&allowlist, "apps", "", "comma-separated curated app names")
 	flag.Parse()
+	if neoPass == "" {
+		neoPass = os.Getenv("NEO4J_PASS")
+	}
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer drv.Close(ctx)
+	if err := drv.VerifyConnectivity(ctx); err != nil {
+		log.Fatal(err)
+	}
 	r := graph.New(drv, "neo4j")
 	for _, app := range strings.Split(allowlist, ",") {
 		app = strings.TrimSpace(app)
@@ -45,9 +51,15 @@ func main() {
 		}
 		svc, _ := r.AppServiceName(ctx, app)
 		dir := filepath.Join(outDir, app)
-		_ = os.MkdirAll(dir, 0o755)
-		_ = os.WriteFile(filepath.Join(dir, "federate.match"), []byte(enrich.FederationMatch(hops)+"\n"), 0o644)
-		_ = os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(enrich.RuleGroup(app, svc, hops)), 0o644)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Fatalf("app %q: mkdir %s: %v", app, dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "federate.match"), []byte(enrich.FederationMatch(hops)+"\n"), 0o644); err != nil {
+			log.Fatalf("app %q: write federate.match: %v", app, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(enrich.RuleGroup(app, svc, hops)), 0o644); err != nil {
+			log.Fatalf("app %q: write rules.yaml: %v", app, err)
+		}
 		log.Printf("app %q: %d hops -> %s", app, len(hops), dir)
 	}
 }

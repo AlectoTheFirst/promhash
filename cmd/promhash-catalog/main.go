@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/starkweb/promhash/internal/catalog"
@@ -22,12 +23,21 @@ func main() {
 	flag.StringVar(&nbToken, "nautobot-token", "", "")
 	flag.StringVar(&vendor, "vendor", "cisco", "default vendor for canonicalization")
 	flag.Parse()
+	if neoPass == "" {
+		neoPass = os.Getenv("NEO4J_PASS")
+	}
+	if nbToken == "" {
+		nbToken = os.Getenv("NAUTOBOT_TOKEN")
+	}
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer drv.Close(ctx)
+	if err := drv.VerifyConnectivity(ctx); err != nil {
+		log.Fatal(err)
+	}
 	r := graph.New(drv, "neo4j")
 	if err := r.EnsureConstraints(ctx); err != nil {
 		log.Fatal(err)

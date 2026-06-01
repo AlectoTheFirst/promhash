@@ -3,7 +3,9 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -44,7 +46,7 @@ func (d *Datasource) runQuery(ctx context.Context, q query) (*data.Frame, error)
 	switch q.QueryType {
 	case "app_path":
 		var hops []hop
-		if err := d.getJSON(ctx, "/apps/"+q.App+"/path", &hops); err != nil {
+		if err := d.getJSON(ctx, "/apps/"+url.PathEscape(q.App)+"/path", &hops); err != nil {
 			return nil, err
 		}
 		dev := make([]string, len(hops))
@@ -62,7 +64,8 @@ func (d *Datasource) runQuery(ctx context.Context, q query) (*data.Frame, error)
 			data.NewField("ifIndex", nil, idx), data.NewField("direction", nil, dir)), nil
 	default: // impact / interface_apps
 		var rows []map[string]string
-		if err := d.getJSON(ctx, "/interfaces/"+q.Device+"/"+q.IfName+"/apps", &rows); err != nil {
+		qs := url.Values{"device": {q.Device}, "ifName": {q.IfName}}
+		if err := d.getJSON(ctx, "/interface-apps?"+qs.Encode(), &rows); err != nil {
 			return nil, err
 		}
 		app := make([]string, len(rows))
@@ -79,11 +82,17 @@ func (d *Datasource) runQuery(ctx context.Context, q query) (*data.Frame, error)
 }
 
 func (d *Datasource) getJSON(ctx context.Context, path string, out any) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+path, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := d.hc.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("upstream %s returned status %d", path, resp.StatusCode)
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

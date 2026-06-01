@@ -7,6 +7,7 @@ package enrich
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +23,10 @@ import (
 func FederationMatch(hops []graph.Hop) string {
 	insts, idxs := map[string]struct{}{}, map[string]struct{}{}
 	for _, h := range hops {
-		insts[h.Instance] = struct{}{}
+		// instance values may contain regex metacharacters (e.g. ':' in host:port
+		// is benign, but '.' '[' etc. are not), so escape them before joining into
+		// the instance=~ alternation. ifIndex is an integer and needs no escaping.
+		insts[regexp.QuoteMeta(h.Instance)] = struct{}{}
 		idxs[strconv.Itoa(h.IfIndex)] = struct{}{}
 	}
 	return fmt.Sprintf(`{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"%s", ifIndex=~"%s"}`,

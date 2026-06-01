@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -42,7 +43,7 @@ func NewServer(r Repo) *Server {
 	s := &Server{repo: r, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /apps", s.listApps)
 	s.mux.HandleFunc("GET /apps/{app}/path", s.appPath)
-	s.mux.HandleFunc("GET /interfaces/{device}/{ifName}/apps", s.ifaceApps)
+	s.mux.HandleFunc("GET /interface-apps", s.ifaceApps)
 	s.mux.HandleFunc("GET /impact", s.impact)
 	return s
 }
@@ -51,13 +52,19 @@ func NewServer(r Repo) *Server {
 // registered, suitable for passing to http.Server or wrapping in middleware.
 func (s *Server) Mux() *http.ServeMux { return s.mux }
 
-func at(r *http.Request) time.Time {
+// at resolves the optional "at" query param to a point-in-time. When the param
+// is absent it returns the current time. When present but unparseable it
+// returns ok=false so the handler can reject the request with a 400 rather than
+// silently falling back to now.
+func at(r *http.Request) (t time.Time, ok bool) {
 	if v := r.URL.Query().Get("at"); v != "" {
-		if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return time.Unix(sec, 0).UTC()
+		sec, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return time.Time{}, false
 		}
+		return time.Unix(sec, 0).UTC(), true
 	}
-	return time.Now()
+	return time.Now(), true
 }
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -67,15 +74,22 @@ func writeJSON(w http.ResponseWriter, v any) {
 func (s *Server) listApps(w http.ResponseWriter, r *http.Request) {
 	apps, err := s.repo.ListApps(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("api: ListApps: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, apps)
 }
 func (s *Server) appPath(w http.ResponseWriter, r *http.Request) {
-	hops, err := s.repo.AppPath(r.Context(), phash.Hash(phash.KindApp, r.PathValue("app")), at(r))
+	t, ok := at(r)
+	if !ok {
+		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+		return
+	}
+	hops, err := s.repo.AppPath(r.Context(), phash.Hash(phash.KindApp, r.PathValue("app")), t)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("api: AppPath: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if hops == nil {
@@ -84,14 +98,23 @@ func (s *Server) appPath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, hops)
 }
 
-// ifaceApps reverse-resolves an interface to the apps that traverse it.
-// device and ifName path values must be the canonical form; the Grafana plugin
-// and other callers pass canonical names produced by C9.
+// ifaceApps reverse-resolves an interface to the apps that traverse it. The
+// device and ifName query params must be the canonical form produced by C9;
+// canonical ifNames contain '/', so they are passed as query params rather than
+// path segments (a single path wildcard would not match them). It resolves the
+// interface phash server-side, the same way impact does.
 func (s *Server) ifaceApps(w http.ResponseWriter, r *http.Request) {
-	p := phash.Hash(phash.KindIface, r.PathValue("device"), r.PathValue("ifName"))
-	rows, err := s.repo.InterfaceImpact(r.Context(), p, at(r))
+	t, ok := at(r)
+	if !ok {
+		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+		return
+	}
+	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
+	p := phash.Hash(phash.KindIface, device, ifName)
+	rows, err := s.repo.InterfaceImpact(r.Context(), p, t)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("api: InterfaceImpact: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, rows)
@@ -100,11 +123,17 @@ func (s *Server) ifaceApps(w http.ResponseWriter, r *http.Request) {
 // impact reports the blast radius of an interface given as device/ifName query
 // params, which must be the canonical form produced by C9.
 func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
+	t, ok := at(r)
+	if !ok {
+		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+		return
+	}
 	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
 	p := phash.Hash(phash.KindIface, device, ifName)
-	rows, err := s.repo.InterfaceImpact(r.Context(), p, at(r))
+	rows, err := s.repo.InterfaceImpact(r.Context(), p, t)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("api: InterfaceImpact: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if len(rows) == 0 {

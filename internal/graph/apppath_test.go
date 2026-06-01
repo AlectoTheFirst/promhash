@@ -25,9 +25,19 @@ func TestAppPathReturnsOrderedUnion(t *testing.T) {
 	if len(hops) < 2 {
 		t.Fatalf("want union of >=2 interfaces, got %d", len(hops))
 	}
+	// The seed uses deterministic seq values (interface:a seq=1, interface:b
+	// seq=2) and AppPath ORDERs BY seq, so the returned union must come back in
+	// non-decreasing seq order.
 	for i := 1; i < len(hops); i++ {
-		if hops[i].Seq < hops[i-1].Seq { /* union may interleave paths; ordering is per-path */
+		if hops[i].Seq < hops[i-1].Seq {
+			t.Fatalf("hops not ordered by seq: index %d seq=%d < index %d seq=%d (hops=%+v)",
+				i, hops[i].Seq, i-1, hops[i-1].Seq, hops)
 		}
+	}
+	// Sanity-check the deterministic seeded sequence end-to-end.
+	if hops[0].Seq != 1 || hops[len(hops)-1].Seq != 2 {
+		t.Fatalf("expected seq to run 1..2, got first=%d last=%d (hops=%+v)",
+			hops[0].Seq, hops[len(hops)-1].Seq, hops)
 	}
 }
 

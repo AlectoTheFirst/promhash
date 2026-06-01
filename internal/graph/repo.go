@@ -6,7 +6,13 @@ import (
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/starkweb/promhash/internal/phash"
 )
+
+// declaredConfidence is the confidence stamped on relationships created from a
+// declaration. Declared topology is taken as ground truth (1.0); flow-derived
+// overlays may later stamp lower values.
+const declaredConfidence = 1.0
 
 // Repo provides access to the topology graph stored in a single Neo4j
 // database. All operations run against the database named at construction.
@@ -150,32 +156,54 @@ func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
 		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
          MERGE (svc:ApplicationService {phash:$svcPHash}) SET svc.name=$appSvc
          MERGE (app)-[:RUNS_AS]->(svc)
-         WITH svc
-         UNWIND $customers AS cust
-           MERGE (c:Customer {phash:'customer:'+cust}) SET c.name=cust
-           MERGE (bs:BusinessService {phash:'businessservice:'+cust+':'+$app}) SET bs.name=$app
-           MERGE (c)-[:CONSUMES]->(bs) MERGE (bs)-[:REALIZED_BY]->(svc)
+         // FOREACH does not collapse cardinality on an empty list, so customer
+         // creation never gates the dependency creation below.
+         FOREACH (cust IN $customers |
+           MERGE (c:Customer {phash:cust.phash}) SET c.name=cust.name
+           MERGE (bs:BusinessService {phash:cust.bsPHash}) SET bs.name=$app
+           MERGE (c)-[:CONSUMES]->(bs) MERGE (bs)-[:REALIZED_BY]->(svc))
          WITH svc
          UNWIND $deps AS dep
            MERGE (target:ApplicationService {phash:dep.toPHash}) SET target.name=dep.to
            MERGE (svc)-[do:DEPENDS_ON]->(target)
-             SET do.provenance='declared', do.source=$source, do.validFrom=$validFrom, do.validTo=null
-           CREATE (conn:Connection {provenance:'declared', source:$source, validFrom:$validFrom, validTo:null})
+             SET do.provenance='declared', do.source=$source, do.confidence=$confidence,
+                 do.observedAt=$observedAt, do.validFrom=$validFrom, do.validTo=null
+           CREATE (conn:Connection {provenance:'declared', source:$source, confidence:$confidence,
+                 observedAt:$observedAt, validFrom:$validFrom, validTo:null})
            MERGE (svc)-[:USES]->(conn) MERGE (conn)-[:TO_SVC]->(target)
            WITH conn, dep
            UNWIND dep.paths AS p
              CREATE (path:Path {provenance:'declared', source:$source})
              MERGE (conn)-[tk:TAKES {provenance:'declared', source:$source, validFrom:$validFrom}]->(path)
-               SET tk.validTo=null
+               SET tk.validTo=null, tk.confidence=$confidence, tk.observedAt=$observedAt
              WITH path, p
              UNWIND p.hops AS h
                MATCH (iface:Interface {phash:h.ifacePHash})
                MERGE (path)-[:HOP {seq:h.seq, direction:h.direction}]->(iface)`,
 		map[string]any{
 			"appPHash": d.AppPHash, "app": d.App, "owner": d.Owner,
-			"svcPHash": d.AppSvcPHash, "appSvc": d.AppSvc, "customers": d.Customers,
-			"source": d.Source, "validFrom": d.ValidFrom.Unix(), "deps": depsToParams(d.Deps),
+			"svcPHash": d.AppSvcPHash, "appSvc": d.AppSvc,
+			"customers": customersToParams(d.Customers, d.App),
+			"source":    d.Source, "validFrom": d.ValidFrom.Unix(),
+			"confidence": declaredConfidence, "observedAt": d.ValidFrom.Unix(),
+			"deps": depsToParams(d.Deps),
 		})
+}
+
+// customersToParams resolves each customer name to its Customer phash and the
+// phash of the BusinessService realizing app for that customer, computed in Go
+// via phash.Hash so identity matches the rest of the system and avoids the
+// collision-prone string concatenation that hand-built ids used.
+func customersToParams(customers []string, app string) []map[string]any {
+	out := make([]map[string]any, 0, len(customers))
+	for _, cust := range customers {
+		out = append(out, map[string]any{
+			"phash":   phash.Hash(phash.KindCustomer, cust),
+			"name":    cust,
+			"bsPHash": phash.Hash(phash.KindBizSvc, cust, app),
+		})
+	}
+	return out
 }
 
 func depsToParams(deps []DeclaredDep) []map[string]any {
@@ -199,12 +227,29 @@ func depsToParams(deps []DeclaredDep) []map[string]any {
 // TAKES relationships and their connections. It is typically called before
 // upserting a new revision so that history is preserved.
 func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Time) error {
-	return r.write(ctx,
-		`MATCH (app:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+	// Each close re-MATCHes from the application independently so that the
+	// absence of an open TAKES never zeroes out the rows for the DEPENDS_ON or
+	// Connection closes. Reusing a chained WITH would drop cardinality to zero
+	// whenever a dependency has no open TAKES, leaving stale-open edges that a
+	// reload could no longer supersede.
+	if err := r.write(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
-         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at
-         WITH svc
-         MATCH (svc)-[do:DEPENDS_ON]->() WHERE do.validTo IS NULL SET do.validTo=$at`,
+         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()}); err != nil {
+		return err
+	}
+	if err := r.write(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[:USES]->(conn:Connection)
+         WHERE conn.validTo IS NULL SET conn.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()}); err != nil {
+		return err
+	}
+	return r.write(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[do:DEPENDS_ON]->()
+         WHERE do.validTo IS NULL SET do.validTo=$at`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 }
 
@@ -217,7 +262,8 @@ func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Ho
          MATCH (svc)-[:USES]->(c:Connection)-[t:TAKES]->(p:Path)-[h:HOP]->(i:Interface)
          WHERE ($at >= t.validFrom) AND (t.validTo IS NULL OR $at < t.validTo)
          RETURN DISTINCT i.device AS device, i.ifName AS ifName, i.metricIfName AS metricIfName,
-                i.instance AS instance, i.ifIndex AS ifIndex, h.seq AS seq, h.direction AS direction
+                i.instance AS instance, i.ifIndex AS ifIndex, h.seq AS seq, h.direction AS direction,
+                t.provenance AS provenance, t.confidence AS confidence
          ORDER BY seq`,
 		map[string]any{"app": appPHash, "at": at.Unix()},
 		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
@@ -228,9 +274,14 @@ func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Ho
 	for _, rec := range res.Records {
 		gs := func(k string) string { v, _ := rec.Get(k); s, _ := v.(string); return s }
 		gi := func(k string) int { v, _ := rec.Get(k); n, _ := v.(int64); return int(n) }
+		gf := func(k string) float64 { v, _ := rec.Get(k); f, _ := v.(float64); return f }
+		prov := gs("provenance")
+		if prov == "" {
+			prov = "declared"
+		}
 		out = append(out, Hop{Device: gs("device"), IfName: gs("ifName"), MetricIfName: gs("metricIfName"),
 			Instance: gs("instance"), IfIndex: gi("ifIndex"), Seq: gi("seq"), Direction: gs("direction"),
-			Provenance: "declared"})
+			Provenance: prov, Confidence: gf("confidence")})
 	}
 	return out, nil
 }

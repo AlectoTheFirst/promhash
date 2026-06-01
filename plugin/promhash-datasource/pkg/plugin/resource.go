@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -19,16 +20,22 @@ func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResource
 	case req.Path == "apps":
 		upstream = "/apps"
 	case strings.HasPrefix(req.Path, "path_interfaces/"):
-		upstream = "/apps/" + strings.TrimPrefix(req.Path, "path_interfaces/") + "/path"
+		upstream = "/apps/" + url.PathEscape(strings.TrimPrefix(req.Path, "path_interfaces/")) + "/path"
 	default:
 		return sender.Send(&backend.CallResourceResponse{Status: http.StatusNotFound})
 	}
-	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+upstream, nil)
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+upstream, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := d.hc.Do(r)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return sender.Send(&backend.CallResourceResponse{Status: http.StatusOK, Body: body})
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return sender.Send(&backend.CallResourceResponse{Status: resp.StatusCode, Body: body})
 }

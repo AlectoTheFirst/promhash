@@ -21,3 +21,16 @@ func TestApplications(t *testing.T) {
 		t.Fatalf("got %+v", apps)
 	}
 }
+
+func TestApplicationsNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"message":"boom"}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "user", "pass")
+	apps, err := c.Applications(context.Background())
+	if err == nil {
+		t.Fatalf("expected error on 500, got nil (apps=%+v)", apps)
+	}
+}

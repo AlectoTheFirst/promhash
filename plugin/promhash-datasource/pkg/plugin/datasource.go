@@ -28,11 +28,18 @@ func NewDatasource(apiURL string) *Datasource {
 // "/apps" endpoint. Any request error or non-200 response yields an error
 // status; a 200 response reports an OK status.
 func (d *Datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+"/apps", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+"/apps", nil)
+	if err != nil {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "promhash API unreachable"}, nil
+	}
 	resp, err := d.hc.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil {
+		// Transport error: resp is nil, nothing to close.
 		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "promhash API unreachable"}, nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "promhash API unreachable"}, nil
+	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: "connected"}, nil
 }

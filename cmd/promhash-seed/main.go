@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/starkweb/promhash/internal/graph"
@@ -20,21 +21,40 @@ func main() {
 	flag.StringVar(&snUser, "servicenow-user", "", "")
 	flag.StringVar(&snPass, "servicenow-pass", "", "")
 	flag.Parse()
+	if neoPass == "" {
+		neoPass = os.Getenv("NEO4J_PASS")
+	}
+	if snPass == "" {
+		snPass = os.Getenv("SERVICENOW_PASS")
+	}
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer drv.Close(ctx)
+	if err := drv.VerifyConnectivity(ctx); err != nil {
+		log.Fatal(err)
+	}
 	r := graph.New(drv, "neo4j")
 	_ = r.EnsureConstraints(ctx)
 	apps, err := servicenow.New(snURL, snUser, snPass).Applications(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
+	var failed bool
+	seeded := 0
 	for _, a := range apps {
-		_ = r.UpsertAppSeed(ctx, phash.Hash(phash.KindApp, a.Name), a.Name,
-			phash.Hash(phash.KindAppSvc, a.Service), a.Service, a.SysID)
+		if err := r.UpsertAppSeed(ctx, phash.Hash(phash.KindApp, a.Name), a.Name,
+			phash.Hash(phash.KindAppSvc, a.Service), a.Service, a.SysID); err != nil {
+			log.Printf("upsert app %q: %v", a.Name, err)
+			failed = true
+			continue
+		}
+		seeded++
 	}
-	log.Printf("seeded %d applications", len(apps))
+	log.Printf("seeded %d applications", seeded)
+	if failed {
+		os.Exit(1)
+	}
 }

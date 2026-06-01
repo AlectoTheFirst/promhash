@@ -5,10 +5,16 @@ package servicenow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// maxBodyBytes caps the response body read from ServiceNow to guard against
+// an unexpectedly large or hostile payload exhausting memory.
+const maxBodyBytes = 16 << 20
 
 // Client is a ServiceNow Table API client that authenticates with HTTP basic
 // auth and reuses a single underlying http.Client for all requests.
@@ -47,15 +53,21 @@ type appResp struct {
 // cmdb_ci_appl table and returns them as a slice of Application. The provided
 // context governs cancellation of the underlying HTTP request.
 func (c *Client) Applications(ctx context.Context) ([]Application, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/now/table/cmdb_ci_appl", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/now/table/cmdb_ci_appl", nil)
+	if err != nil {
+		return nil, err
+	}
 	req.SetBasicAuth(c.user, c.pass)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("servicenow: status %d", resp.StatusCode)
+	}
 	var ar appResp
-	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&ar); err != nil {
 		return nil, err
 	}
 	out := make([]Application, 0, len(ar.Result))
