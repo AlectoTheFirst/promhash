@@ -195,3 +195,15 @@ func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Ho
 	}
 	return out, nil
 }
+
+func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
+		map[string]any{"app": app}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil || len(res.Records) == 0 {
+		return app, err
+	}
+	v, _ := res.Records[0].Get("n")
+	s, _ := v.(string)
+	return s, nil
+}
