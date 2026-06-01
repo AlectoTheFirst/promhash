@@ -80,6 +80,74 @@ func ifaceFromProps(p map[string]any) Iface {
 		Instance: gs("instance"), Vendor: gs("vendor"), IfIndex: gi("ifIndex")}
 }
 
+// DeclaredHop is a resolved hop ready to persist.
+type DeclaredHop struct {
+	IfacePHash string
+	Seq        int
+	Direction  string
+}
+type DeclaredPath struct{ Hops []DeclaredHop }
+type DeclaredDep struct {
+	ToAppSvc, ToName string
+	Paths            []DeclaredPath
+}
+type DeclaredApp struct {
+	AppPHash, App, AppSvcPHash, AppSvc, Owner string
+	Customers                                 []string
+	Deps                                      []DeclaredDep
+	Source                                    string
+	ValidFrom                                 time.Time
+}
+
+func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
+	return r.write(ctx,
+		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
+         MERGE (svc:ApplicationService {phash:$svcPHash}) SET svc.name=$appSvc
+         MERGE (app)-[:RUNS_AS]->(svc)
+         WITH svc
+         UNWIND $customers AS cust
+           MERGE (c:Customer {phash:'customer:'+cust}) SET c.name=cust
+           MERGE (bs:BusinessService {phash:'businessservice:'+cust+':'+$app}) SET bs.name=$app
+           MERGE (c)-[:CONSUMES]->(bs) MERGE (bs)-[:REALIZED_BY]->(svc)
+         WITH svc
+         UNWIND $deps AS dep
+           MERGE (target:ApplicationService {phash:dep.toPHash}) SET target.name=dep.to
+           MERGE (svc)-[do:DEPENDS_ON]->(target)
+             SET do.provenance='declared', do.source=$source, do.validFrom=$validFrom, do.validTo=null
+           CREATE (conn:Connection {provenance:'declared', source:$source, validFrom:$validFrom, validTo:null})
+           MERGE (svc)-[:USES]->(conn) MERGE (conn)-[:TO_SVC]->(target)
+           WITH conn, dep
+           UNWIND dep.paths AS p
+             CREATE (path:Path {provenance:'declared', source:$source})
+             MERGE (conn)-[tk:TAKES {provenance:'declared', source:$source, validFrom:$validFrom}]->(path)
+               SET tk.validTo=null
+             WITH path, p
+             UNWIND p.hops AS h
+               MATCH (iface:Interface {phash:h.ifacePHash})
+               MERGE (path)-[:HOP {seq:h.seq, direction:h.direction}]->(iface)`,
+		map[string]any{
+			"appPHash": d.AppPHash, "app": d.App, "owner": d.Owner,
+			"svcPHash": d.AppSvcPHash, "appSvc": d.AppSvc, "customers": d.Customers,
+			"source": d.Source, "validFrom": d.ValidFrom.Unix(), "deps": depsToParams(d.Deps),
+		})
+}
+
+func depsToParams(deps []DeclaredDep) []map[string]any {
+	out := make([]map[string]any, 0, len(deps))
+	for _, dep := range deps {
+		paths := make([]map[string]any, 0, len(dep.Paths))
+		for _, p := range dep.Paths {
+			hops := make([]map[string]any, 0, len(p.Hops))
+			for _, h := range p.Hops {
+				hops = append(hops, map[string]any{"ifacePHash": h.IfacePHash, "seq": h.Seq, "direction": h.Direction})
+			}
+			paths = append(paths, map[string]any{"hops": hops})
+		}
+		out = append(out, map[string]any{"toPHash": dep.ToAppSvc, "to": dep.ToName, "paths": paths})
+	}
+	return out
+}
+
 func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Hop, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (a:Application {phash:$app})-[:RUNS_AS]->(svc:ApplicationService)
