@@ -196,6 +196,28 @@ func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Ho
 	return out, nil
 }
 
+func (r *Repo) InterfaceImpact(ctx context.Context, ifacePHash string, at time.Time) ([]ImpactRow, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (i:Interface {phash:$if})<-[:HOP]-(:Path)<-[t:TAKES]-(:Connection)<-[:USES]-(svc:ApplicationService)
+         WHERE ($at >= t.validFrom) AND (t.validTo IS NULL OR $at < t.validTo)
+         MATCH (a:Application)-[:RUNS_AS]->(svc)
+         OPTIONAL MATCH (svc)<-[:REALIZED_BY]-(:BusinessService)<-[:CONSUMES]-(c:Customer)
+         RETURN DISTINCT a.name AS app, svc.name AS service, a.owner AS owner,
+                coalesce(c.name,'') AS customer, coalesce(a.criticality,'') AS criticality`,
+		map[string]any{"if": ifacePHash, "at": at.Unix()},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ImpactRow, 0, len(res.Records))
+	for _, rec := range res.Records {
+		gs := func(k string) string { v, _ := rec.Get(k); s, _ := v.(string); return s }
+		out = append(out, ImpactRow{App: gs("app"), Service: gs("service"), Owner: gs("owner"),
+			Customer: gs("customer"), Criticality: gs("criticality")})
+	}
+	return out, nil
+}
+
 func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
