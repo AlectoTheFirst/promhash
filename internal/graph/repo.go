@@ -148,6 +148,16 @@ func depsToParams(deps []DeclaredDep) []map[string]any {
 	return out
 }
 
+func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Time) error {
+	return r.write(ctx,
+		`MATCH (app:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
+         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at
+         WITH svc
+         MATCH (svc)-[do:DEPENDS_ON]->() WHERE do.validTo IS NULL SET do.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()})
+}
+
 func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Hop, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (a:Application {phash:$app})-[:RUNS_AS]->(svc:ApplicationService)

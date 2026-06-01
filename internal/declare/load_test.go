@@ -37,6 +37,30 @@ func TestLoadCreatesPathHops(t *testing.T) {
 	}
 }
 
+func TestCloseValiditySetsValidTo(t *testing.T) {
+	ctx := context.Background()
+	drv, cleanup := testutil.Neo4j(t, ctx)
+	defer cleanup()
+	r := graph.New(drv, "neo4j")
+	_ = r.EnsureConstraints(ctx)
+	seedCatalog(t, ctx, r)
+	a, _ := Parse([]byte(sample))
+	res := catalog.NewResolver(loadCatalog(t, ctx, r))
+	_ = Load(ctx, r, a, res, "sha1", time.Unix(1700000000, 0).UTC())
+	closeAt := time.Unix(1700000900, 0).UTC()
+	if err := r.CloseAppValidity(ctx, appPHash("payments"), closeAt); err != nil {
+		t.Fatal(err)
+	}
+	hops, _ := r.AppPath(ctx, appPHash("payments"), time.Now())
+	if len(hops) != 0 {
+		t.Fatalf("expected no current hops after retraction, got %d", len(hops))
+	}
+	past, _ := r.AppPath(ctx, appPHash("payments"), time.Unix(1700000100, 0).UTC())
+	if len(past) == 0 {
+		t.Fatal("expected historical hops to remain queryable")
+	}
+}
+
 // seedCatalog upserts the two interfaces from resolver() so the declaration's
 // (device, if) references resolve and the HOP MATCH finds real Interface nodes.
 func seedCatalog(t *testing.T, ctx context.Context, r *graph.Repo) {
