@@ -218,6 +218,22 @@ func (r *Repo) InterfaceImpact(ctx context.Context, ifacePHash string, at time.T
 	return out, nil
 }
 
+func (r *Repo) ListApps(ctx context.Context) ([]string, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (a:Application) RETURN a.name AS n ORDER BY n`, nil,
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(res.Records))
+	for _, rec := range res.Records {
+		v, _ := rec.Get("n")
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
