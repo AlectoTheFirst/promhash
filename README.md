@@ -230,6 +230,8 @@ Field reference:
 
 All tools share the Neo4j connection flags `-neo4j`, `-neo4j-user`, `-neo4j-pass`.
 
+**Secrets.** To keep credentials out of process listings, each tool reads its secret from the environment when the corresponding flag is empty: `NEO4J_PASS` (all tools), `NAUTOBOT_TOKEN` (`promhash-catalog`), and `SERVICENOW_PASS` (`promhash-seed`). Prefer the environment variables over the flags.
+
 ### `promhash-catalog` — build the interface catalog
 
 Harvests the real interface inventory from Prometheus and binds it to device names from Nautobot, upserting `Interface` nodes that carry the actual metric labels and current `ifIndex`. This is the normalization layer that lets declarations use human interface names. Run it on a schedule.
@@ -273,7 +275,7 @@ For each named application, traverses the graph, resolves current `ifIndex`/`ins
 ### `promhash-api` — serve the graph over HTTP
 
 ```
--addr  listen address  (default :8080)
+-addr  listen address  (default 127.0.0.1:8080 — bind to localhost; front with an authenticating proxy to expose)
 ```
 
 ---
@@ -286,10 +288,10 @@ A small read-only surface over the graph, backed by Cypher. It is the single ser
 |----------|---------|
 | `GET /apps` | List of application names. |
 | `GET /apps/{app}/path` | The application's path as an ordered list of hops. |
-| `GET /interfaces/{device}/{ifName}/apps` | Applications, services and customers that traverse an interface. |
+| `GET /interface-apps?device=&ifName=` | Applications, services and customers that traverse an interface. |
 | `GET /impact?device=&ifName=&at=<unix>` | Blast radius for an interface, optionally at a point in time. |
 
-`{app}` is a business application name; `{device}`/`ifName` use the canonical interface name (the form stored in the catalog). The optional `at` parameter is a Unix timestamp for point-in-time queries; it defaults to now.
+`{app}` is a business application name. `device` and `ifName` are passed as query parameters using the canonical interface name (the form stored in the catalog) — query parameters are used because canonical names contain `/`. The optional `at` parameter is a Unix timestamp for point-in-time queries; it defaults to now.
 
 Example — application path:
 
@@ -365,7 +367,7 @@ The working set per tenant is the size of one application's path — tens to hun
 
 **"Which applications and customers cross this interface?"**
 ```bash
-curl -s "localhost:8080/interfaces/rtr-core-1/tengige0/1/2/apps" | jq
+curl -s "localhost:8080/interface-apps?device=rtr-core-1&ifName=tengige0/1/2" | jq
 ```
 
 **Build an app-path-health dashboard (no per-app series).** Add the promhash datasource; create a variable from `path_interfaces/$app`; in a Prometheus panel, filter the raw interface metrics by that variable.
@@ -439,6 +441,15 @@ TESTCONTAINERS_RYUK_DISABLED=true make test-int
 - **Curated-only projection.** Per-application series exist only where they earn their keep. Everything else is a free graph lookup.
 
 ---
+
+## Known v1 simplifications
+
+The data model in the graph is the full design; v1 deliberately implements a subset of it. These are conscious scope decisions, not oversights, and the schema is built so each can be filled in without a rewrite:
+
+- **Endpoint / IP / Segment nodes are not yet materialized.** Declared data has no `ip:port`, so the loader wires `ApplicationService -[:USES]-> Connection` directly. The `ip:port:proto` Endpoint layer (and `Connection -[:FROM|:TO]-> Endpoint` directionality) lands with flow ingestion (Layer 2); until then traffic direction is carried per-hop on `HOP`.
+- **Device identity is a property, not a node.** An interface stores its device name as the `device` property (sufficient for the impact and path queries); a first-class `(:Device)` node with `(:Interface)-[:ON]->(:Device)` is deferred.
+- **`HOP` validity is inherited from its parent `TAKES` edge.** Point-in-time queries filter on `TAKES` validity; `HOP` carries only `seq` and `direction`. Superseded `Path` nodes are retained immutably as history and are reachable only through a closed `TAKES`.
+- **The HTTP API ships no built-in authentication or TLS.** It binds to localhost by default and returns generic errors. Expose it by fronting it with an authenticating reverse proxy or mTLS; treat the API host as a trust boundary.
 
 ## Roadmap
 
