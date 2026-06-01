@@ -234,6 +234,14 @@ func (r *Repo) ListApps(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+func (r *Repo) UpsertAppSeed(ctx context.Context, appPHash, app, svcPHash, svc, sysID string) error {
+	return r.write(ctx,
+		`MERGE (a:Application {phash:$appPHash}) SET a.name=$app, a.sysId=$sysID
+         MERGE (s:ApplicationService {phash:$svcPHash}) SET s.name=$svc
+         MERGE (a)-[:RUNS_AS]->(s)`,
+		map[string]any{"appPHash": appPHash, "app": app, "svcPHash": svcPHash, "svc": svc, "sysID": sysID})
+}
+
 func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
