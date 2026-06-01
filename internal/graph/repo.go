@@ -8,11 +8,14 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
+// Repo provides access to the topology graph stored in a single Neo4j
+// database. All operations run against the database named at construction.
 type Repo struct {
 	drv neo4j.DriverWithContext
 	db  string
 }
 
+// New returns a Repo that issues queries through drv against the database db.
 func New(drv neo4j.DriverWithContext, db string) *Repo { return &Repo{drv: drv, db: db} }
 
 func (r *Repo) write(ctx context.Context, cy string, params map[string]any) error {
@@ -21,6 +24,9 @@ func (r *Repo) write(ctx context.Context, cy string, params map[string]any) erro
 	return err
 }
 
+// EnsureConstraints creates the uniqueness constraints on the "phash" property
+// for every node label used by the graph, if they do not already exist. It is
+// idempotent and safe to call on every startup.
 func (r *Repo) EnsureConstraints(ctx context.Context) error {
 	for _, label := range []string{LabelInterface, LabelDevice, "Application", "ApplicationService",
 		"BusinessService", "Customer", "Endpoint", "IP", "Segment"} {
@@ -33,6 +39,9 @@ func (r *Repo) EnsureConstraints(ctx context.Context) error {
 	return nil
 }
 
+// UpsertInterface creates or updates the Interface node keyed by i.PHash,
+// overwriting its properties with the values in i and marking its provenance
+// as "observed".
 func (r *Repo) UpsertInterface(ctx context.Context, i Iface) error {
 	return r.write(ctx,
 		`MERGE (n:Interface {phash:$phash})
@@ -45,6 +54,8 @@ func (r *Repo) UpsertInterface(ctx context.Context, i Iface) error {
 			"observedAt": i.ObservedAt.Unix()})
 }
 
+// GetInterfaceByPHash returns the Interface identified by phash. It returns
+// ErrNotFound if no such interface exists.
 func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (n:Interface {phash:$phash}) RETURN n`, map[string]any{"phash": phash},
@@ -60,6 +71,7 @@ func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, er
 	return ifaceFromProps(props), nil
 }
 
+// ListAllInterfaces returns every Interface node in the graph.
 func (r *Repo) ListAllInterfaces(ctx context.Context) ([]Iface, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv, `MATCH (n:Interface) RETURN n`, nil,
 		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
@@ -74,6 +86,7 @@ func (r *Repo) ListAllInterfaces(ctx context.Context) ([]Iface, error) {
 	return out, nil
 }
 
+// ErrNotFound is returned by lookups when no matching node exists in the graph.
 var ErrNotFound = fmt.Errorf("graph: node not found")
 
 func ifaceFromProps(p map[string]any) Iface {
@@ -100,11 +113,23 @@ type DeclaredHop struct {
 	Seq        int
 	Direction  string
 }
+
+// DeclaredPath is an ordered sequence of hops describing one route a
+// dependency takes through the network.
 type DeclaredPath struct{ Hops []DeclaredHop }
+
+// DeclaredDep is a declared dependency on another application service.
+// ToAppSvc is the target service's phash and ToName its display name; Paths
+// holds the one or more routes the dependency may follow.
 type DeclaredDep struct {
 	ToAppSvc, ToName string
 	Paths            []DeclaredPath
 }
+
+// DeclaredApp is a complete declared application topology to persist: the
+// application and its service (by phash and name), its owner and consuming
+// customers, and its declared dependencies. Source records the origin of the
+// declaration and ValidFrom the time from which it becomes effective.
 type DeclaredApp struct {
 	AppPHash, App, AppSvcPHash, AppSvc, Owner string
 	Customers                                 []string
@@ -113,6 +138,13 @@ type DeclaredApp struct {
 	ValidFrom                                 time.Time
 }
 
+// UpsertDeclaredApp persists a declared application topology: it merges the
+// Application and its ApplicationService, links consuming customers via
+// BusinessService nodes, and creates the declared dependencies together with
+// their Connection, Path and HOP relationships. The created dependency,
+// connection and path edges are stamped with provenance "declared", the given
+// source and d.ValidFrom, and are left open (validTo null). Interfaces
+// referenced by hops must already exist.
 func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
 	return r.write(ctx,
 		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
@@ -162,6 +194,10 @@ func depsToParams(deps []DeclaredDep) []map[string]any {
 	return out
 }
 
+// CloseAppValidity ends the currently open declarations for the application
+// identified by appPHash by setting validTo to at on its open DEPENDS_ON and
+// TAKES relationships and their connections. It is typically called before
+// upserting a new revision so that history is preserved.
 func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Time) error {
 	return r.write(ctx,
 		`MATCH (app:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
@@ -172,6 +208,9 @@ func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Ti
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 }
 
+// AppPath returns the ordered hops of the application's path that were valid at
+// time at, considering only TAKES relationships whose validity window contains
+// at. Hops are returned sorted by sequence.
 func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Hop, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (a:Application {phash:$app})-[:RUNS_AS]->(svc:ApplicationService)
@@ -196,6 +235,11 @@ func (r *Repo) AppPath(ctx context.Context, appPHash string, at time.Time) ([]Ho
 	return out, nil
 }
 
+// InterfaceImpact returns the applications and services affected by the
+// interface identified by ifacePHash at time at, traversing paths whose
+// validity window contains at. Each row includes any consuming customer and
+// owner/criticality metadata, with one row per distinct app/service/customer
+// combination.
 func (r *Repo) InterfaceImpact(ctx context.Context, ifacePHash string, at time.Time) ([]ImpactRow, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (i:Interface {phash:$if})<-[:HOP]-(:Path)<-[t:TAKES]-(:Connection)<-[:USES]-(svc:ApplicationService)
@@ -218,6 +262,7 @@ func (r *Repo) InterfaceImpact(ctx context.Context, ifacePHash string, at time.T
 	return out, nil
 }
 
+// ListApps returns the names of all Application nodes, sorted alphabetically.
 func (r *Repo) ListApps(ctx context.Context) ([]string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (a:Application) RETURN a.name AS n ORDER BY n`, nil,
@@ -234,6 +279,10 @@ func (r *Repo) ListApps(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// UpsertAppSeed creates or updates the minimal Application and
+// ApplicationService nodes (and the RUNS_AS relationship between them) from
+// seed data, recording the external system identifier sysID on the
+// application. It establishes a stub that later declarations can enrich.
 func (r *Repo) UpsertAppSeed(ctx context.Context, appPHash, app, svcPHash, svc, sysID string) error {
 	return r.write(ctx,
 		`MERGE (a:Application {phash:$appPHash}) SET a.name=$app, a.sysId=$sysID
@@ -242,6 +291,9 @@ func (r *Repo) UpsertAppSeed(ctx context.Context, appPHash, app, svcPHash, svc, 
 		map[string]any{"appPHash": appPHash, "app": app, "svcPHash": svcPHash, "svc": svc, "sysID": sysID})
 }
 
+// AppServiceName returns the name of the ApplicationService that the named
+// application runs as. If the application has no service or the lookup fails,
+// it falls back to returning app unchanged.
 func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,

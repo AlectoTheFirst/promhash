@@ -1,3 +1,6 @@
+// Package nautobot provides a minimal client for querying a Nautobot
+// instance's REST API, used to resolve device inventory into the
+// management IPs that Prometheus targets as scrape instances.
 package nautobot
 
 import (
@@ -8,11 +11,17 @@ import (
 	"time"
 )
 
+// Client talks to a Nautobot REST API using a base URL and an optional
+// API token for authentication.
 type Client struct {
 	base, token string
 	hc          *http.Client
 }
 
+// New returns a Client for the given Nautobot base URL and API token.
+// Any trailing slash on base is trimmed, and the underlying HTTP client
+// is configured with a 30-second request timeout. An empty token results
+// in unauthenticated requests.
 func New(base, token string) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), token: token, hc: &http.Client{Timeout: 30 * time.Second}}
 }

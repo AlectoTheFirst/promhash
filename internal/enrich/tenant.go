@@ -3,8 +3,11 @@ package enrich
 
 import "fmt"
 
-// TenantScrapeConfig is the per-app federation scrape job: pull only this app's
-// slice from the main Prometheus into the curated tenant.
+// TenantScrapeConfig renders the per-app federation scrape job (as YAML) that
+// pulls only this app's slice from the main Prometheus into the curated tenant.
+// It honors source labels and federates the series selected by match; mainProm
+// may include an http:// or https:// scheme, which is stripped to a host:port
+// scrape target.
 func TenantScrapeConfig(app, mainProm, match string) string {
 	return fmt.Sprintf(`scrape_configs:
   - job_name: promhash-fed-%s

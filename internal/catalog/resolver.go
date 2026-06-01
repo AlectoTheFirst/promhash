@@ -8,27 +8,40 @@ import (
 	"github.com/starkweb/promhash/internal/graph"
 )
 
+// NoMatchError reports that no interface on the device matched the requested
+// reference. Suggestions holds a short, sorted list of available interface
+// names to help the caller correct the reference.
 type NoMatchError struct {
 	Device, Ref string
 	Suggestions []string
 }
 
+// Error implements the error interface, naming the device, the unmatched
+// reference, and the suggested interface names.
 func (e *NoMatchError) Error() string {
 	return fmt.Sprintf("no interface on %q matches %q; did you mean: %s",
 		e.Device, e.Ref, strings.Join(e.Suggestions, ", "))
 }
 
+// AmbiguousError reports that a reference matched more than one interface on the
+// device. Matches holds the metric ifName of every interface that matched.
 type AmbiguousError struct {
 	Device, Ref string
 	Matches     []string
 }
 
+// Error implements the error interface, naming the device, the ambiguous
+// reference, and every interface it matched.
 func (e *AmbiguousError) Error() string {
 	return fmt.Sprintf("ref %q on %q is ambiguous: %s", e.Ref, e.Device, strings.Join(e.Matches, ", "))
 }
 
+// Resolver matches human-supplied interface references to catalog interfaces,
+// indexing the known interfaces by device for lookup.
 type Resolver struct{ byDevice map[string][]graph.Iface }
 
+// NewResolver builds a Resolver from the given interfaces, grouping them by
+// their Device for subsequent Resolve calls.
 func NewResolver(ifaces []graph.Iface) *Resolver {
 	m := map[string][]graph.Iface{}
 	for _, i := range ifaces {

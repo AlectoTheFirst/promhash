@@ -9,7 +9,10 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
-// CallResource serves variable queries: "apps" and "path_interfaces/<app>".
+// CallResource serves Grafana variable queries by proxying to the promhash API.
+// It supports the path "apps" (mapped to "/apps") and "path_interfaces/<app>"
+// (mapped to "/apps/<app>/path"); any other path returns HTTP 404. The upstream
+// response body is forwarded verbatim.
 func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
 	var upstream string
 	switch {

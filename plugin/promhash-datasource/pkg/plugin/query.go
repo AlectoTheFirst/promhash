@@ -19,6 +19,9 @@ type hop struct {
 	IfIndex      int    `json:"ifIndex"`
 }
 
+// QueryData executes each query in req, decoding its JSON model and dispatching
+// to runQuery. Errors for an individual query are reported in that query's
+// response under its RefID rather than aborting the whole batch.
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	resp := backend.NewQueryDataResponse()
 	for _, q := range req.Queries {

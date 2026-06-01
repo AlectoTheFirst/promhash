@@ -1,3 +1,7 @@
+// Package catalog builds and queries the canonical interface catalog: it
+// normalizes vendor-specific interface names, synchronizes harvested Prometheus
+// interface rows into graph Interface nodes, and resolves human-supplied
+// interface references to exactly one catalog interface.
 package catalog
 
 import (

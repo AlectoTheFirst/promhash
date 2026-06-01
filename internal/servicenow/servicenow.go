@@ -1,3 +1,5 @@
+// Package servicenow provides a minimal client for reading configuration
+// items from a ServiceNow instance via its Table API.
 package servicenow
 
 import (
@@ -8,16 +10,30 @@ import (
 	"time"
 )
 
+// Client is a ServiceNow Table API client that authenticates with HTTP basic
+// auth and reuses a single underlying http.Client for all requests.
 type Client struct {
 	base, user, pass string
 	hc               *http.Client
 }
 
+// New returns a Client targeting the ServiceNow instance at base, using user
+// and pass for basic authentication. Any trailing slash on base is trimmed,
+// and the underlying HTTP client is configured with a 30 second timeout.
 func New(base, user, pass string) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), user: user, pass: pass, hc: &http.Client{Timeout: 30 * time.Second}}
 }
 
-type Application struct{ Name, SysID, Service string }
+// Application represents an application configuration item (cmdb_ci_appl)
+// retrieved from ServiceNow.
+type Application struct {
+	// Name is the display name of the application CI.
+	Name string
+	// SysID is the ServiceNow record sys_id uniquely identifying the CI.
+	SysID string
+	// Service is the associated service, sourced from the u_app_service field.
+	Service string
+}
 
 type appResp struct {
 	Result []struct {
@@ -27,6 +43,9 @@ type appResp struct {
 	} `json:"result"`
 }
 
+// Applications fetches all application configuration items from the
+// cmdb_ci_appl table and returns them as a slice of Application. The provided
+// context governs cancellation of the underlying HTTP request.
 func (c *Client) Applications(ctx context.Context) ([]Application, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/now/table/cmdb_ci_appl", nil)
 	req.SetBasicAuth(c.user, c.pass)
