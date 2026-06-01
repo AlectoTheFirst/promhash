@@ -1,0 +1,9 @@
+{
+  "type": "datasource",
+  "name": "promhash",
+  "id": "starkweb-promhash-datasource",
+  "backend": true,
+  "executable": "gpx_promhash",
+  "info": { "description": "Query the promhash application-path graph", "version": "0.1.0" },
+  "dependencies": { "grafanaDependency": ">=10.4.0" }
+}
