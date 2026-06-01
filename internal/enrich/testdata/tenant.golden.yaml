@@ -1,0 +1,8 @@
+scrape_configs:
+  - job_name: promhash-fed-payments
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      'match[]': ['{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"10.0.0.1", ifIndex=~"42"}']
+    static_configs:
+      - targets: ['main-prometheus:9090']
