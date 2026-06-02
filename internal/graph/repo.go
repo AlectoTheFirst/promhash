@@ -151,6 +151,13 @@ type DeclaredApp struct {
 // connection and path edges are stamped with provenance "declared", the given
 // source and d.ValidFrom, and are left open (validTo null). Interfaces
 // referenced by hops must already exist.
+//
+// DEPENDS_ON and TAKES are append-only: {provenance,source,validFrom} sit in the
+// MERGE pattern, so a re-declaration at a new validFrom creates a fresh edge
+// rather than re-matching a closed one. The SET ...validTo=null is safe because a
+// closed edge always carries an earlier validFrom and is never re-matched here;
+// it only keeps an idempotent same-validFrom reload open. This invariant relies on
+// validFrom being strictly increasing across reloads (see plan task D2).
 func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
 	return r.write(ctx,
 		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
@@ -165,9 +172,8 @@ func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
          WITH svc
          UNWIND $deps AS dep
            MERGE (target:ApplicationService {phash:dep.toPHash}) SET target.name=dep.to
-           MERGE (svc)-[do:DEPENDS_ON]->(target)
-             SET do.provenance='declared', do.source=$source, do.confidence=$confidence,
-                 do.observedAt=$observedAt, do.validFrom=$validFrom, do.validTo=null
+           MERGE (svc)-[do:DEPENDS_ON {provenance:'declared', source:$source, validFrom:$validFrom}]->(target)
+             SET do.confidence=$confidence, do.observedAt=$observedAt, do.validTo=null
            CREATE (conn:Connection {provenance:'declared', source:$source, confidence:$confidence,
                  observedAt:$observedAt, validFrom:$validFrom, validTo:null})
            MERGE (svc)-[:USES]->(conn) MERGE (conn)-[:TO_SVC]->(target)
