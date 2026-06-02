@@ -30,6 +30,18 @@ func (r *Repo) write(ctx context.Context, cy string, params map[string]any) erro
 	return err
 }
 
+// execWrite opens a managed write session and runs fn inside a single
+// ExecuteWrite transaction. The driver retries fn on transient errors;
+// fn must be idempotent. The session is always closed before returning.
+func (r *Repo) execWrite(ctx context.Context, fn func(tx neo4j.ManagedTransaction) error) error {
+	sess := r.drv.NewSession(ctx, neo4j.SessionConfig{DatabaseName: r.db, AccessMode: neo4j.AccessModeWrite})
+	defer sess.Close(ctx)
+	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		return nil, fn(tx)
+	})
+	return err
+}
+
 // EnsureConstraints creates the uniqueness constraints on the "phash" property
 // for every node label used by the graph, if they do not already exist. It is
 // idempotent and safe to call on every startup.
@@ -148,13 +160,8 @@ type DeclaredApp struct {
 	ValidFrom                                 time.Time
 }
 
-// UpsertDeclaredApp persists a declared application topology: it merges the
-// Application and its ApplicationService, links consuming customers via
-// BusinessService nodes, and creates the declared dependencies together with
-// their Connection, Path and HOP relationships. The created dependency,
-// connection and path edges are stamped with provenance "declared", the given
-// source and d.ValidFrom, and are left open (validTo null). Interfaces
-// referenced by hops must already exist.
+// upsertDeclaredAppTx runs the UpsertDeclaredApp Cypher inside the caller's
+// managed transaction tx.
 //
 // DEPENDS_ON and TAKES are append-only: {provenance,source,validFrom} sit in the
 // MERGE pattern, so a re-declaration at a new validFrom creates a fresh edge
@@ -162,8 +169,8 @@ type DeclaredApp struct {
 // closed edge always carries an earlier validFrom and is never re-matched here;
 // it only keeps an idempotent same-validFrom reload open. This invariant relies on
 // validFrom being strictly increasing across reloads (see plan task D2).
-func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
-	return r.write(ctx,
+func upsertDeclaredAppTx(ctx context.Context, tx neo4j.ManagedTransaction, d DeclaredApp) error {
+	res, err := tx.Run(ctx,
 		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
          MERGE (svc:ApplicationService {phash:$svcPHash}) SET svc.name=$appSvc
          MERGE (app)-[:RUNS_AS]->(svc)
@@ -198,6 +205,24 @@ func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
 			"confidence": declaredConfidence, "observedAt": d.ValidFrom.Unix(),
 			"deps": depsToParams(d.Deps),
 		})
+	if err != nil {
+		return err
+	}
+	_, err = res.Consume(ctx)
+	return err
+}
+
+// UpsertDeclaredApp persists a declared application topology: it merges the
+// Application and its ApplicationService, links consuming customers via
+// BusinessService nodes, and creates the declared dependencies together with
+// their Connection, Path and HOP relationships. The created dependency,
+// connection and path edges are stamped with provenance "declared", the given
+// source and d.ValidFrom, and are left open (validTo null). Interfaces
+// referenced by hops must already exist.
+func (r *Repo) UpsertDeclaredApp(ctx context.Context, d DeclaredApp) error {
+	return r.execWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		return upsertDeclaredAppTx(ctx, tx, d)
+	})
 }
 
 // customersToParams resolves each customer name to its Customer phash and the
@@ -232,35 +257,71 @@ func depsToParams(deps []DeclaredDep) []map[string]any {
 	return out
 }
 
+// closeAppValidityTx runs the three CloseAppValidity Cypher statements inside
+// the caller's managed transaction tx.
+//
+// Each close re-MATCHes from the application independently so that the
+// absence of an open TAKES never zeroes out the rows for the DEPENDS_ON or
+// Connection closes. Reusing a chained WITH would drop cardinality to zero
+// whenever a dependency has no open TAKES, leaving stale-open edges that a
+// reload could no longer supersede.
+func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHash string, at time.Time) error {
+	res, err := tx.Run(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
+         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()})
+	if err != nil {
+		return err
+	}
+	if _, err = res.Consume(ctx); err != nil {
+		return err
+	}
+	res, err = tx.Run(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[:USES]->(conn:Connection)
+         WHERE conn.validTo IS NULL SET conn.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()})
+	if err != nil {
+		return err
+	}
+	if _, err = res.Consume(ctx); err != nil {
+		return err
+	}
+	res, err = tx.Run(ctx,
+		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
+         MATCH (svc)-[do:DEPENDS_ON]->()
+         WHERE do.validTo IS NULL SET do.validTo=$at`,
+		map[string]any{"appPHash": appPHash, "at": at.Unix()})
+	if err != nil {
+		return err
+	}
+	_, err = res.Consume(ctx)
+	return err
+}
+
 // CloseAppValidity ends the currently open declarations for the application
 // identified by appPHash by setting validTo to at on its open DEPENDS_ON and
 // TAKES relationships and their connections. It is typically called before
 // upserting a new revision so that history is preserved.
 func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Time) error {
-	// Each close re-MATCHes from the application independently so that the
-	// absence of an open TAKES never zeroes out the rows for the DEPENDS_ON or
-	// Connection closes. Reusing a chained WITH would drop cardinality to zero
-	// whenever a dependency has no open TAKES, leaving stale-open edges that a
-	// reload could no longer supersede.
-	if err := r.write(ctx,
-		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
-         MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
-         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at`,
-		map[string]any{"appPHash": appPHash, "at": at.Unix()}); err != nil {
-		return err
-	}
-	if err := r.write(ctx,
-		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
-         MATCH (svc)-[:USES]->(conn:Connection)
-         WHERE conn.validTo IS NULL SET conn.validTo=$at`,
-		map[string]any{"appPHash": appPHash, "at": at.Unix()}); err != nil {
-		return err
-	}
-	return r.write(ctx,
-		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
-         MATCH (svc)-[do:DEPENDS_ON]->()
-         WHERE do.validTo IS NULL SET do.validTo=$at`,
-		map[string]any{"appPHash": appPHash, "at": at.Unix()})
+	return r.execWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		return closeAppValidityTx(ctx, tx, appPHash, at)
+	})
+}
+
+// ReloadDeclaredApp closes the currently open declarations for d.AppPHash (as of
+// at) and upserts the new revision atomically in a single managed write
+// transaction. A crash or error after the closes but before the upsert is fully
+// written causes the entire transaction to roll back, so the app never vanishes
+// from current state.
+func (r *Repo) ReloadDeclaredApp(ctx context.Context, d DeclaredApp, at time.Time) error {
+	return r.execWrite(ctx, func(tx neo4j.ManagedTransaction) error {
+		if err := closeAppValidityTx(ctx, tx, d.AppPHash, at); err != nil {
+			return err
+		}
+		return upsertDeclaredAppTx(ctx, tx, d)
+	})
 }
 
 // AppPath returns the ordered hops of the application's path that were valid at
