@@ -15,6 +15,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("promhash-catalog: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var promURL, neoURL, neoUser, neoPass, nbURL, nbToken, vendor string
 	var timeout time.Duration
 	flag.StringVar(&promURL, "prometheus", "http://localhost:9090", "Prometheus base URL")
@@ -35,33 +42,33 @@ func main() {
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer drv.Close(ctx)
 	if err := drv.VerifyConnectivity(ctx); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	r := graph.New(drv, "neo4j")
 	if err := r.EnsureConstraints(ctx); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	pc, err := promclient.NewWithTimeout(promURL, timeout)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	hctx, hcancel := context.WithTimeout(ctx, timeout)
 	rows, skipped, err := pc.HarvestInterfaces(hctx)
 	hcancel()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	devMap := map[string]string{}
+	var devMap map[string]string
 	if nbURL != "" {
 		nbctx, nbcancel := context.WithTimeout(ctx, timeout)
 		devMap, err = nautobot.New(nbURL, nbToken).DeviceInstanceMap(nbctx)
 		nbcancel()
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	inv := map[string]string{}
@@ -69,11 +76,11 @@ func main() {
 		inv[ip] = dev
 	} // instance(ip) -> device
 	if err := catalog.Sync(ctx, r, rows, inv, vendor); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	ifaces, err := r.ListAllInterfaces(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	oldest := catalog.OldestObservedAt(ifaces)
 	oldestStr := "n/a"
@@ -81,4 +88,5 @@ func main() {
 		oldestStr = oldest.Format(time.RFC3339)
 	}
 	log.Printf("catalog sync: %d interfaces (%d skipped), oldest observedAt %s", len(rows), skipped, oldestStr)
+	return nil
 }

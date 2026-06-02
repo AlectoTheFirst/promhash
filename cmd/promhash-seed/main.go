@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -14,6 +16,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("promhash-seed: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var neoURL, neoUser, neoPass, snURL, snUser, snPass string
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
@@ -31,19 +40,21 @@ func main() {
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer drv.Close(ctx)
 	if err := drv.VerifyConnectivity(ctx); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	r := graph.New(drv, "neo4j")
-	_ = r.EnsureConstraints(ctx)
+	if err := r.EnsureConstraints(ctx); err != nil {
+		return fmt.Errorf("ensure constraints: %w", err)
+	}
 	snctx, sncancel := context.WithTimeout(ctx, 60*time.Second)
 	apps, err := servicenow.New(snURL, snUser, snPass).Applications(snctx)
 	sncancel()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	var failed bool
 	seeded := 0
@@ -58,6 +69,7 @@ func main() {
 	}
 	log.Printf("seeded %d applications", seeded)
 	if failed {
-		os.Exit(1)
+		return errors.New("one or more applications failed to seed")
 	}
+	return nil
 }

@@ -17,6 +17,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("promhash-api: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var addr, neoURL, neoUser, neoPass string
 	flag.StringVar(&addr, "addr", "127.0.0.1:8080", "")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
@@ -37,11 +44,16 @@ func main() {
 
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer drv.Close(ctx)
+	// Use a fresh context for Close so the signal-cancelled ctx doesn't prevent
+	// the driver from flushing its connections on shutdown.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+	defer drv.Close(closeCtx)
+
 	if err := drv.VerifyConnectivity(ctx); err != nil {
-		log.Fatalf("neo4j connectivity: %v", err)
+		return err
 	}
 
 	srv := &http.Server{
@@ -53,18 +65,27 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	// Route ListenAndServe errors out of the goroutine instead of log.Fatal-ing,
+	// so the deferred Close and graceful shutdown path are never skipped.
+	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("promhash-api listening on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			errCh <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done(): // signal-driven shutdown
+	}
+
 	log.Print("promhash-api shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("shutdown: %v", err)
+		return err
 	}
+	return nil
 }

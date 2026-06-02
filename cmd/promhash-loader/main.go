@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -15,6 +16,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("promhash-loader: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var dir, neoURL, neoUser, neoPass, sha string
 	var validateOnly bool
 	flag.StringVar(&dir, "dir", "declared", "directory of *.yaml declarations")
@@ -30,16 +38,16 @@ func main() {
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer drv.Close(ctx)
 	if err := drv.VerifyConnectivity(ctx); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	r := graph.New(drv, "neo4j")
 	cat, err := r.ListAllInterfaces(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	res := catalog.NewResolver(cat)
 	files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
@@ -73,7 +81,8 @@ func main() {
 		}
 	}
 	if failed {
-		os.Exit(1)
+		return errors.New("one or more declarations failed")
 	}
 	log.Printf("processed %d declarations (validateOnly=%v)", len(files), validateOnly)
+	return nil
 }
