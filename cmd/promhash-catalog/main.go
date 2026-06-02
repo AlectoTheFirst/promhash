@@ -50,7 +50,7 @@ func main() {
 		log.Fatal(err)
 	}
 	hctx, hcancel := context.WithTimeout(ctx, timeout)
-	rows, err := pc.HarvestInterfaces(hctx)
+	rows, skipped, err := pc.HarvestInterfaces(hctx)
 	hcancel()
 	if err != nil {
 		log.Fatal(err)
@@ -71,5 +71,5 @@ func main() {
 	if err := catalog.Sync(ctx, r, rows, inv, vendor); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("catalog sync: %d interfaces", len(rows))
+	log.Printf("catalog sync: %d interfaces (%d rows skipped: bad ifIndex)", len(rows), skipped)
 }

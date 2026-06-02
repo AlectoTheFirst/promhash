@@ -4,6 +4,7 @@ package promclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -48,24 +49,34 @@ func NewWithTimeout(addr string, timeout time.Duration) (*Client, error) {
 const harvestQuery = `group by (instance, ifIndex, ifName, ifDescr, ifAlias) (ifHCInOctets)`
 
 // HarvestInterfaces queries Prometheus for the set of known interfaces and
-// returns one IfaceRow per series. It evaluates the harvest query at the
-// server's current time and returns a nil slice (without error) when the
-// result is not a vector.
-func (c *Client) HarvestInterfaces(ctx context.Context) ([]IfaceRow, error) {
+// returns one IfaceRow per series. skipped counts series whose ifIndex label
+// was present but non-numeric (those rows are not appended). An absent ifIndex
+// label is allowed and yields IfIndex=0. An empty vector (zero series) is not
+// an error. A non-vector result type (matrix, scalar, string) is an error.
+func (c *Client) HarvestInterfaces(ctx context.Context) (rows []IfaceRow, skipped int, err error) {
 	val, _, err := c.api.Query(ctx, harvestQuery, time.Time{})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	vec, ok := val.(model.Vector)
 	if !ok {
-		return nil, nil
+		return nil, 0, fmt.Errorf("promclient: unexpected query result type %T (want vector)", val)
 	}
 	out := make([]IfaceRow, 0, len(vec))
 	for _, s := range vec {
-		idx, _ := strconv.Atoi(string(s.Metric["ifIndex"]))
+		idxStr := string(s.Metric["ifIndex"])
+		var idx int
+		if idxStr != "" {
+			var perr error
+			idx, perr = strconv.Atoi(idxStr)
+			if perr != nil {
+				skipped++
+				continue
+			}
+		}
 		out = append(out, IfaceRow{
 			Instance: string(s.Metric["instance"]), IfName: string(s.Metric["ifName"]),
 			IfDescr: string(s.Metric["ifDescr"]), IfAlias: string(s.Metric["ifAlias"]), IfIndex: idx})
 	}
-	return out, nil
+	return out, skipped, nil
 }
