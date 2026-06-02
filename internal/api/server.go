@@ -98,26 +98,27 @@ func (s *Server) appPath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, hops)
 }
 
-// ifaceApps reverse-resolves an interface to the apps that traverse it. The
-// device and ifName query params must be the canonical form produced by C9;
-// canonical ifNames contain '/', so they are passed as query params rather than
-// path segments (a single path wildcard would not match them). It resolves the
-// interface phash server-side, the same way impact does.
-func (s *Server) ifaceApps(w http.ResponseWriter, r *http.Request) {
-	t, ok := at(r)
-	if !ok {
-		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+// lookupImpact resolves (device, ifName) to a stored interface phash and
+// returns its impact rows. C1 keeps the raw hash; a later task (C2) swaps the
+// resolution body to use the catalog Resolver.
+func (s *Server) lookupImpact(ctx context.Context, device, ifName string, t time.Time) (rows []graph.ImpactRow, resolvedPHash string, err error) {
+	resolvedPHash = phash.Hash(phash.KindIface, device, ifName)
+	rows, err = s.repo.InterfaceImpact(ctx, resolvedPHash, t)
+	return
+}
+
+// writeImpact writes the shared wrapped response body for both /impact and
+// /interface-apps. When rows is empty or nil, impact is [] (never null) and a
+// "no path known" note is added.
+func writeImpact(w http.ResponseWriter, device, ifName string, rows []graph.ImpactRow) {
+	if rows == nil {
+		rows = []graph.ImpactRow{}
+	}
+	if len(rows) == 0 {
+		writeJSON(w, map[string]any{"interface": device + "/" + ifName, "impact": rows, "note": "no path known"})
 		return
 	}
-	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
-	p := phash.Hash(phash.KindIface, device, ifName)
-	rows, err := s.repo.InterfaceImpact(r.Context(), p, t)
-	if err != nil {
-		log.Printf("api: InterfaceImpact: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, rows)
+	writeJSON(w, map[string]any{"interface": device + "/" + ifName, "impact": rows})
 }
 
 // impact reports the blast radius of an interface given as device/ifName query
@@ -129,16 +130,18 @@ func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
-	p := phash.Hash(phash.KindIface, device, ifName)
-	rows, err := s.repo.InterfaceImpact(r.Context(), p, t)
+	rows, _, err := s.lookupImpact(r.Context(), device, ifName, t)
 	if err != nil {
 		log.Printf("api: InterfaceImpact: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if len(rows) == 0 {
-		writeJSON(w, map[string]any{"interface": device + "/" + ifName, "impact": []graph.ImpactRow{}, "note": "no path known"})
-		return
-	}
-	writeJSON(w, map[string]any{"interface": device + "/" + ifName, "impact": rows})
+	writeImpact(w, device, ifName, rows)
+}
+
+// ifaceApps is an alias for impact: both routes call the same handler so their
+// response bodies are byte-identical. The /interface-apps route is kept for
+// backward compatibility with the Grafana plugin.
+func (s *Server) ifaceApps(w http.ResponseWriter, r *http.Request) {
+	s.impact(w, r)
 }
