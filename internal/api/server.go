@@ -58,14 +58,27 @@ func NewServer(r Repo) *Server {
 // registered, suitable for passing to http.Server or wrapping in middleware.
 func (s *Server) Mux() *http.ServeMux { return s.mux }
 
+// minAtUnix is the lower bound for the "at" query parameter (Unix epoch, 1970-01-01T00:00:00Z).
+// Pre-epoch timestamps are meaningless for network-graph temporal queries.
+const minAtUnix int64 = 0
+
+// maxAtUnix is the upper bound for the "at" query parameter (2100-01-01T00:00:00Z).
+// Legitimate point-in-time queries fall well within this window; values beyond
+// it are almost certainly bugs or attacks rather than real timestamps.
+const maxAtUnix int64 = 4102444800
+
 // at resolves the optional "at" query param to a point-in-time. When the param
-// is absent it returns the current time. When present but unparseable it
-// returns ok=false so the handler can reject the request with a 400 rather than
-// silently falling back to now.
+// is absent it returns the current time. When present but unparseable, or
+// outside the accepted range [minAtUnix, maxAtUnix] (Unix epoch to 2100-01-01),
+// it returns ok=false so the handler can reject the request with a 400 rather
+// than silently falling back to now or passing absurd instants to the graph.
 func at(r *http.Request) (t time.Time, ok bool) {
 	if v := r.URL.Query().Get("at"); v != "" {
 		sec, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
+			return time.Time{}, false
+		}
+		if sec < minAtUnix || sec > maxAtUnix {
 			return time.Time{}, false
 		}
 		return time.Unix(sec, 0).UTC(), true

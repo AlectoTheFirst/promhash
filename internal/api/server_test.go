@@ -390,6 +390,77 @@ func TestImpactEmptyDeviceRejectedViaAlias(t *testing.T) {
 	}
 }
 
+// TestAtParamBounds verifies that out-of-range timestamps are rejected with 400
+// before any repo method is called, and that in-range timestamps (including the
+// lower boundary 0 and absent param) are accepted with 200.
+//
+// The test drives /impact with a valid device/ifName so the empty-param guard
+// (C3) does not fire before at() is evaluated. Out-of-range cases must not
+// reach the repo — accessTrackingRepo's flags prove that.
+func TestAtParamBounds(t *testing.T) {
+	const validQ = "device=rtr-core-1&ifName=" + "tengige0%2F1%2F2"
+
+	tests := []struct {
+		name             string
+		at               string // empty means omit the param
+		wantCode         int
+		wantRepoNotCalled bool
+	}{
+		{
+			name:             "negative timestamp rejected",
+			at:               "-1",
+			wantCode:         http.StatusBadRequest,
+			wantRepoNotCalled: true,
+		},
+		{
+			name:             "far-future timestamp rejected",
+			at:               "99999999999999",
+			wantCode:         http.StatusBadRequest,
+			wantRepoNotCalled: true,
+		},
+		{
+			name:     "valid recent timestamp accepted",
+			at:       "1700000000",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "lower boundary zero accepted",
+			at:       "0",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "absent at param accepted",
+			at:       "",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &accessTrackingRepo{}
+			srv := NewServer(repo)
+			u := "/impact?" + validQ
+			if tc.at != "" {
+				u += "&at=" + tc.at
+			}
+			rec := httptest.NewRecorder()
+			srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u, nil))
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("at=%q: got HTTP %d, want %d (body: %s)", tc.at, rec.Code, tc.wantCode, rec.Body)
+			}
+			if tc.wantRepoNotCalled {
+				if repo.listAllInterfacesCalled {
+					t.Errorf("at=%q: ListAllInterfaces was called — at-bounds guard must fire before repo access", tc.at)
+				}
+				if repo.interfaceImpactCalled {
+					t.Errorf("at=%q: InterfaceImpact was called — at-bounds guard must fire before repo access", tc.at)
+				}
+			}
+		})
+	}
+}
+
 // TestImpactWhitespaceOnlyDeviceRejected asserts that a whitespace-only device
 // (%20) is treated as empty and rejected with 400.
 func TestImpactWhitespaceOnlyDeviceRejected(t *testing.T) {
