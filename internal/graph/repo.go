@@ -447,6 +447,32 @@ func (r *Repo) UpsertAppSeed(ctx context.Context, appPHash, app, svcPHash, svc, 
 		map[string]any{"appPHash": appPHash, "app": app, "svcPHash": svcPHash, "svc": svc, "sysID": sysID})
 }
 
+// ListOpenDeclaredApps returns the distinct app phashes for every Application
+// that currently has at least one open (validTo IS NULL) declared DEPENDS_ON
+// edge. It is used by the loader's reconcile pass to detect apps whose
+// declaration YAML was deleted and must be tombstoned.
+//
+// NOTE: Do NOT use ListApps for this purpose — it returns every Application
+// node including seed-only stubs that have no declared edges.
+func (r *Repo) ListOpenDeclaredApps(ctx context.Context) ([]string, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (app:Application)-[:RUNS_AS]->(:ApplicationService)-[do:DEPENDS_ON]->()
+		 WHERE do.validTo IS NULL AND do.provenance='declared'
+		 RETURN DISTINCT app.phash AS p`,
+		nil,
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(res.Records))
+	for _, rec := range res.Records {
+		v, _ := rec.Get("p")
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 // AppServiceName returns the name of the ApplicationService that the named
 // application runs as. If the application has no service or the lookup fails,
 // it falls back to returning app unchanged.
