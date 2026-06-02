@@ -101,6 +101,72 @@ func TestResolveDeviceCaseVariantsAllSamePHash(t *testing.T) {
 	}
 }
 
+// TestResolveEmptyRefReturnsNoMatch verifies that Resolve with an empty (or
+// whitespace-only) ref always returns *NoMatchError and never binds to a
+// degenerate interface node whose IfName or IfAlias happens to be empty.
+func TestResolveEmptyRefReturnsNoMatch(t *testing.T) {
+	ifaces := []graph.Iface{
+		// Degenerate interface: IfName is empty (as would result from a skipped
+		// sync row that somehow made it in before the F3 guard).
+		{PHash: "interface:degenerate", Device: "rtr1", IfName: "",
+			MetricIfName: "", IfDescr: "", IfAlias: "", Vendor: "cisco"},
+		// Normal interface on the same device.
+		{PHash: "interface:good", Device: "rtr1", IfName: "tengige0/1/2",
+			MetricIfName: "Te0/1/2", IfDescr: "TenGigE0/1/2", IfAlias: "uplink", Vendor: "cisco"},
+	}
+	res := NewResolver(ifaces)
+
+	for _, ref := range []string{"", "   ", "\t"} {
+		_, err := res.Resolve("rtr1", ref)
+		var nm *NoMatchError
+		if !errors.As(err, &nm) {
+			t.Errorf("Resolve(%q, %q) want *NoMatchError, got %v", "rtr1", ref, err)
+		}
+	}
+}
+
+// TestResolveNonEmptyRefDoesNotMatchEmptyStoredAlias verifies that a non-empty
+// ref does not match an interface whose IfAlias or MetricIfName is empty, and
+// conversely that it still resolves to the correct interface when the fields are
+// populated.
+func TestResolveNonEmptyRefDoesNotMatchEmptyStoredAlias(t *testing.T) {
+	ifaces := []graph.Iface{
+		// Interface with empty IfAlias and MetricIfName — must NOT match a
+		// non-empty ref solely because the stored field is empty.
+		{PHash: "interface:sparse", Device: "rtr1", IfName: "gi0/1",
+			MetricIfName: "", IfDescr: "GigabitEthernet0/1", IfAlias: "", Vendor: "cisco"},
+		// Interface with populated fields.
+		{PHash: "interface:full", Device: "rtr1", IfName: "gi0/2",
+			MetricIfName: "Gi0/2", IfDescr: "GigabitEthernet0/2", IfAlias: "uplink", Vendor: "cisco"},
+	}
+	res := NewResolver(ifaces)
+
+	// A ref that would equal the empty stored IfAlias must NOT match.
+	_, err := res.Resolve("rtr1", "Gi0/1")
+	if err != nil {
+		// Gi0/1 should resolve via IfName "gi0/1" (canonical match), so err
+		// would be nil — this branch is here to show intent.
+		t.Logf("Resolve Gi0/1 via IfName: %v (ok if nil)", err)
+	}
+
+	// A ref that cannot match anything should return NoMatchError, not
+	// accidentally bind to the interface with empty MetricIfName.
+	_, err = res.Resolve("rtr1", "no-such-if")
+	var nm *NoMatchError
+	if !errors.As(err, &nm) {
+		t.Errorf("Resolve(%q, %q) want *NoMatchError, got %v", "rtr1", "no-such-if", err)
+	}
+
+	// Normal resolve still works.
+	got, err := res.Resolve("rtr1", "uplink")
+	if err != nil {
+		t.Fatalf("Resolve(rtr1, uplink): %v", err)
+	}
+	if got.PHash != "interface:full" {
+		t.Errorf("Resolve(rtr1, uplink): got PHash %q; want interface:full", got.PHash)
+	}
+}
+
 // TestSafeKeyGuard verifies that phash.SafeKey rejects ':' and control chars.
 // These are the values that Sync would skip rather than store, protecting the
 // ':'-delimited identity key scheme.

@@ -60,15 +60,18 @@ func NewResolver(ifaces []graph.Iface) *Resolver {
 // case/whitespace variant of the device name.
 func (r *Resolver) Resolve(device, ref string) (graph.Iface, error) {
 	list := r.byDevice[phash.NormDevice(device)]
+	if strings.TrimSpace(ref) == "" {
+		return graph.Iface{}, &NoMatchError{Device: device, Ref: ref, Suggestions: suggest(list)}
+	}
 	want := CanonicalIfName("", ref)
 	refLower := strings.ToLower(strings.TrimSpace(ref))
 	var hits []graph.Iface
 	for _, i := range list {
 		switch {
-		case i.IfName == want,
-			CanonicalIfName(i.Vendor, i.IfDescr) == want,
-			strings.ToLower(i.IfAlias) == refLower,
-			strings.ToLower(i.MetricIfName) == refLower:
+		case want != "" && i.IfName == want,
+			want != "" && CanonicalIfName(i.Vendor, i.IfDescr) == want,
+			refLower != "" && strings.ToLower(i.IfAlias) == refLower,
+			refLower != "" && strings.ToLower(i.MetricIfName) == refLower:
 			hits = append(hits, i)
 		}
 	}

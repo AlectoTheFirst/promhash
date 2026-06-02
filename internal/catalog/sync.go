@@ -33,6 +33,12 @@ func Sync(ctx context.Context, r *graph.Repo, rows []promclient.IfaceRow,
 		if canon == "" {
 			canon = CanonicalIfName(vendor, row.IfDescr)
 		}
+		if canon == "" {
+			log.Printf("catalog.Sync: skipping row with empty canonical name (device=%q ifName=%q ifDescr=%q)",
+				dev, row.IfName, row.IfDescr)
+			skipped++
+			continue
+		}
 		if err := phash.SafeKey("device", dev); err != nil {
 			log.Printf("catalog.Sync: skipping row (instance=%q): %v", row.Instance, err)
 			skipped++

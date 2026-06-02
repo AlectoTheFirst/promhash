@@ -31,6 +31,37 @@ func TestSyncUpsertsInterfaces(t *testing.T) {
 	}
 }
 
+// TestSyncEmptyCanonSkipped verifies that rows whose IfName and IfDescr both
+// canonicalize to "" are skipped rather than upserted, so no degenerate shared
+// phash node is minted for unnamed interfaces on a device.
+func TestSyncEmptyCanonSkipped(t *testing.T) {
+	ctx := context.Background()
+	drv, cleanup := testutil.Neo4j(t, ctx)
+	defer cleanup()
+	r := graph.New(drv, "neo4j")
+	_ = r.EnsureConstraints(ctx)
+
+	// Two rows on the same device, both with empty IfName and IfDescr.
+	rows := []promclient.IfaceRow{
+		{Instance: "10.0.0.9", IfName: "", IfDescr: "", IfAlias: "alias-a", IfIndex: 1},
+		{Instance: "10.0.0.9", IfName: "", IfDescr: "", IfAlias: "alias-b", IfIndex: 2},
+	}
+	devByInstance := map[string]string{"10.0.0.9": "rtr-empty-test"}
+	if err := Sync(ctx, r, rows, devByInstance, "cisco"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The degenerate phash (device + "") must not exist.
+	degeneratePHash := ifacePHash("rtr-empty-test", "")
+	_, err := r.GetInterfaceByPHash(ctx, degeneratePHash)
+	if err == nil {
+		t.Fatal("expected ErrNotFound for degenerate phash, but node was found")
+	}
+	if err != graph.ErrNotFound {
+		t.Fatalf("expected graph.ErrNotFound, got %v", err)
+	}
+}
+
 // TestSyncCaseVariantsCollapseToOneNode verifies that two Sync calls for the
 // same interface whose device names differ only in case — "Rtr1" and "rtr1" —
 // produce exactly ONE Interface node (same phash), and that a Resolver built
