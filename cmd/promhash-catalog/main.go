@@ -5,16 +5,18 @@ import (
 	"flag"
 	"log"
 	"os"
+	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/catalog"
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 	"github.com/AlectoTheFirst/promhash/internal/nautobot"
 	"github.com/AlectoTheFirst/promhash/internal/promclient"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 func main() {
 	var promURL, neoURL, neoUser, neoPass, nbURL, nbToken, vendor string
+	var timeout time.Duration
 	flag.StringVar(&promURL, "prometheus", "http://localhost:9090", "Prometheus base URL")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "Neo4j bolt URL")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
@@ -22,6 +24,7 @@ func main() {
 	flag.StringVar(&nbURL, "nautobot", "", "Nautobot base URL")
 	flag.StringVar(&nbToken, "nautobot-token", "", "")
 	flag.StringVar(&vendor, "vendor", "cisco", "default vendor for canonicalization")
+	flag.DurationVar(&timeout, "timeout", 60*time.Second, "per-call deadline for upstream HTTP requests")
 	flag.Parse()
 	if neoPass == "" {
 		neoPass = os.Getenv("NEO4J_PASS")
@@ -42,17 +45,22 @@ func main() {
 	if err := r.EnsureConstraints(ctx); err != nil {
 		log.Fatal(err)
 	}
-	pc, err := promclient.New(promURL)
+	pc, err := promclient.NewWithTimeout(promURL, timeout)
 	if err != nil {
 		log.Fatal(err)
 	}
-	rows, err := pc.HarvestInterfaces(ctx)
+	hctx, hcancel := context.WithTimeout(ctx, timeout)
+	rows, err := pc.HarvestInterfaces(hctx)
+	hcancel()
 	if err != nil {
 		log.Fatal(err)
 	}
 	devMap := map[string]string{}
 	if nbURL != "" {
-		if devMap, err = nautobot.New(nbURL, nbToken).DeviceInstanceMap(ctx); err != nil {
+		nbctx, nbcancel := context.WithTimeout(ctx, timeout)
+		devMap, err = nautobot.New(nbURL, nbToken).DeviceInstanceMap(nbctx)
+		nbcancel()
+		if err != nil {
 			log.Fatal(err)
 		}
 	}

@@ -5,11 +5,12 @@ import (
 	"flag"
 	"log"
 	"os"
+	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 	"github.com/AlectoTheFirst/promhash/internal/phash"
 	"github.com/AlectoTheFirst/promhash/internal/servicenow"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 func main() {
@@ -38,7 +39,9 @@ func main() {
 	}
 	r := graph.New(drv, "neo4j")
 	_ = r.EnsureConstraints(ctx)
-	apps, err := servicenow.New(snURL, snUser, snPass).Applications(ctx)
+	snctx, sncancel := context.WithTimeout(ctx, 60*time.Second)
+	apps, err := servicenow.New(snURL, snUser, snPass).Applications(snctx)
+	sncancel()
 	if err != nil {
 		log.Fatal(err)
 	}

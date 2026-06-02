@@ -4,6 +4,7 @@ package promclient
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -24,10 +25,20 @@ type IfaceRow struct {
 // Client wraps a Prometheus HTTP API for harvesting interface metadata.
 type Client struct{ api v1.API }
 
-// New constructs a Client targeting the Prometheus server at addr. It returns
-// an error if the address cannot be used to build the underlying API client.
+// New constructs a Client targeting the Prometheus server at addr with a
+// default overall HTTP timeout of 30 seconds. It returns an error if the
+// address cannot be used to build the underlying API client.
 func New(addr string) (*Client, error) {
-	c, err := promapi.NewClient(promapi.Config{Address: addr})
+	return NewWithTimeout(addr, 30*time.Second)
+}
+
+// NewWithTimeout constructs a Client targeting the Prometheus server at addr
+// and applies timeout as the overall http.Client.Timeout (covers connect,
+// TLS, and body read combined). It returns an error if the address cannot be
+// used to build the underlying API client.
+func NewWithTimeout(addr string, timeout time.Duration) (*Client, error) {
+	httpClient := &http.Client{Timeout: timeout}
+	c, err := promapi.NewClient(promapi.Config{Address: addr, Client: httpClient})
 	if err != nil {
 		return nil, err
 	}
