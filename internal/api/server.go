@@ -7,11 +7,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/AlectoTheFirst/promhash/internal/catalog"
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
@@ -29,6 +31,9 @@ type Repo interface {
 	InterfaceImpact(ctx context.Context, ifacePHash string, at time.Time) ([]graph.ImpactRow, error)
 	// ListApps returns the identifiers of all known applications.
 	ListApps(ctx context.Context) ([]string, error)
+	// ListAllInterfaces returns every known interface, used by lookupImpact to
+	// build a catalog.Resolver that maps raw query params to canonical phashes.
+	ListAllInterfaces(ctx context.Context) ([]graph.Iface, error)
 }
 
 // Server routes the HTTP API endpoints to handlers backed by a Repo.
@@ -98,11 +103,25 @@ func (s *Server) appPath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, hops)
 }
 
-// lookupImpact resolves (device, ifName) to a stored interface phash and
-// returns its impact rows. C1 keeps the raw hash; a later task (C2) swaps the
-// resolution body to use the catalog Resolver.
+// lookupImpact resolves (device, ifName) to a canonical catalog interface and
+// returns its impact rows. Resolution uses catalog.Resolver so that natural
+// names (e.g. "Te0/1/2") map to the same canonical phash as the stored node
+// (e.g. "tengige0/1/2"). Caller must inspect the error type to distinguish
+// *catalog.NoMatchError, *catalog.AmbiguousError, and hard repo errors.
+//
+// TODO(OPT-10): this rebuilds the Resolver from a full ListAllInterfaces scan on
+// every request. Acceptable for v1 catalogs; cache the Resolver with a TTL in the
+// long-lived API process before this is on a hot path.
 func (s *Server) lookupImpact(ctx context.Context, device, ifName string, t time.Time) (rows []graph.ImpactRow, resolvedPHash string, err error) {
-	resolvedPHash = phash.Hash(phash.KindIface, device, ifName)
+	ifaces, err := s.repo.ListAllInterfaces(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	ifc, rerr := catalog.NewResolver(ifaces).Resolve(device, ifName)
+	if rerr != nil {
+		return nil, "", rerr
+	}
+	resolvedPHash = ifc.PHash
 	rows, err = s.repo.InterfaceImpact(ctx, resolvedPHash, t)
 	return
 }
@@ -122,7 +141,8 @@ func writeImpact(w http.ResponseWriter, device, ifName string, rows []graph.Impa
 }
 
 // impact reports the blast radius of an interface given as device/ifName query
-// params, which must be the canonical form produced by C9.
+// params. The ifName may be in any recognized form (canonical, metric, alias,
+// description); the catalog resolver maps it to a canonical phash server-side.
 func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
 	t, ok := at(r)
 	if !ok {
@@ -132,8 +152,31 @@ func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
 	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
 	rows, _, err := s.lookupImpact(r.Context(), device, ifName, t)
 	if err != nil {
-		log.Printf("api: InterfaceImpact: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		var noMatch *catalog.NoMatchError
+		var ambiguous *catalog.AmbiguousError
+		switch {
+		case errors.As(err, &noMatch):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":       "no interface matches",
+				"device":      noMatch.Device,
+				"ifName":      noMatch.Ref,
+				"suggestions": noMatch.Suggestions,
+			})
+		case errors.As(err, &ambiguous):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":   "ambiguous interface reference",
+				"device":  ambiguous.Device,
+				"ifName":  ambiguous.Ref,
+				"matches": ambiguous.Matches,
+			})
+		default:
+			log.Printf("api: InterfaceImpact: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
 		return
 	}
 	writeImpact(w, device, ifName, rows)

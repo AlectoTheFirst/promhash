@@ -11,7 +11,25 @@ import (
 	"time"
 
 	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
+
+// canonicalPHash is the phash for the test interface (device rtr-core-1,
+// canonical ifName tengige0/1/2). Both the natural name Te0/1/2 and the
+// canonical name must resolve to this same value.
+var canonicalPHash = phash.Hash(phash.KindIface, "rtr-core-1", "tengige0/1/2")
+
+// testIfaces returns the catalog slice used by fakeRepo. The single interface
+// has IfName=tengige0/1/2 (canonical) and MetricIfName=Te0/1/2 (natural),
+// so the resolver maps both forms to the same canonical phash.
+func testIfaces() []graph.Iface {
+	return []graph.Iface{{
+		PHash:        canonicalPHash,
+		Device:       "rtr-core-1",
+		IfName:       "tengige0/1/2",
+		MetricIfName: "Te0/1/2",
+	}}
+}
 
 // fakeRepo is the default fake that returns one ImpactRow.
 type fakeRepo struct{}
@@ -23,6 +41,9 @@ func (fakeRepo) InterfaceImpact(_ context.Context, _ string, _ time.Time) ([]gra
 	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
 }
 func (fakeRepo) ListApps(_ context.Context) ([]string, error) { return []string{"payments"}, nil }
+func (fakeRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
+	return testIfaces(), nil
+}
 
 // emptyRepo returns a nil slice from InterfaceImpact to exercise the nil→[] guard.
 type emptyRepo struct{ fakeRepo }
@@ -40,6 +61,18 @@ type recordingRepo struct {
 func (r *recordingRepo) InterfaceImpact(_ context.Context, p string, _ time.Time) ([]graph.ImpactRow, error) {
 	r.recorded = append(r.recorded, p)
 	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
+}
+
+// ambiguousRepo returns two interfaces on one device that both match the ref
+// "Te0/1/2": one via canonical IfName, one via MetricIfName — so Resolve yields
+// *catalog.AmbiguousError.
+type ambiguousRepo struct{ fakeRepo }
+
+func (ambiguousRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
+	return []graph.Iface{
+		{PHash: "if-a", Device: "rtr-dup", IfName: "tengige0/1/2", MetricIfName: "ten-a"},
+		{PHash: "if-b", Device: "rtr-dup", IfName: "ten-b", MetricIfName: "Te0/1/2"},
+	}, nil
 }
 
 func TestAppPathHandler(t *testing.T) {
@@ -146,8 +179,10 @@ func TestImpactEmptyHasNoteAndNotNull(t *testing.T) {
 	}
 }
 
-// TestImpactBothRoutesSamePHash asserts that both routes pass the same
-// resolved phash to InterfaceImpact for the same device/ifName query.
+// TestImpactBothRoutesSamePHash is a regression guard asserting that /impact
+// and /interface-apps both resolve the same device/ifName to the identical
+// CANONICAL phash. After C2, the resolver drives resolution, so this test
+// also guards that neither route regresses to a raw-hash path.
 func TestImpactBothRoutesSamePHash(t *testing.T) {
 	repo := &recordingRepo{}
 	srv := NewServer(repo)
@@ -164,6 +199,106 @@ func TestImpactBothRoutesSamePHash(t *testing.T) {
 	if repo.recorded[0] != repo.recorded[1] {
 		t.Fatalf("/impact phash %q != /interface-apps phash %q",
 			repo.recorded[0], repo.recorded[1])
+	}
+	// Both must equal the canonical phash (not a raw hash of the query param).
+	if repo.recorded[0] != canonicalPHash {
+		t.Fatalf("phash %q != canonical %q", repo.recorded[0], canonicalPHash)
+	}
+}
+
+// TestImpactResolvesNaturalName verifies that querying with the natural/metric
+// ifName (Te0/1/2) is resolved to the canonical phash before hitting the repo.
+func TestImpactResolvesNaturalName(t *testing.T) {
+	repo := &recordingRepo{}
+	srv := NewServer(repo)
+	q := "?device=rtr-core-1&ifName=" + url.QueryEscape("Te0/1/2")
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	if len(repo.recorded) != 1 {
+		t.Fatalf("expected 1 recorded phash, got %d", len(repo.recorded))
+	}
+	if repo.recorded[0] != canonicalPHash {
+		t.Fatalf("InterfaceImpact called with raw phash %q, want canonical %q",
+			repo.recorded[0], canonicalPHash)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body)
+	}
+	impact, ok := out["impact"].([]any)
+	if !ok || len(impact) != 1 {
+		t.Fatalf("expected impact array with 1 element, body %s", rec.Body)
+	}
+}
+
+// TestImpactResolvesCanonicalName verifies that querying with the canonical
+// ifName (tengige0/1/2) also resolves to the same canonical phash.
+func TestImpactResolvesCanonicalName(t *testing.T) {
+	repo := &recordingRepo{}
+	srv := NewServer(repo)
+	q := "?device=rtr-core-1&ifName=" + url.QueryEscape("tengige0/1/2")
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	if len(repo.recorded) != 1 {
+		t.Fatalf("expected 1 recorded phash, got %d", len(repo.recorded))
+	}
+	if repo.recorded[0] != canonicalPHash {
+		t.Fatalf("InterfaceImpact called with raw phash %q, want canonical %q",
+			repo.recorded[0], canonicalPHash)
+	}
+}
+
+// TestImpactUnknownIfaceReturns404 verifies that an unrecognised interface
+// reference produces a 404 response whose JSON body includes a non-empty
+// "suggestions" list drawn from the catalog.
+func TestImpactUnknownIfaceReturns404(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	q := "?device=rtr-core-1&ifName=" + url.QueryEscape("Zz9/9/9")
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body %s", rec.Code, rec.Body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body)
+	}
+	if out["error"] == nil {
+		t.Fatalf("missing 'error' field, body %s", rec.Body)
+	}
+	sug, ok := out["suggestions"].([]any)
+	if !ok || len(sug) == 0 {
+		t.Fatalf("expected non-empty 'suggestions', body %s", rec.Body)
+	}
+}
+
+// TestImpactAmbiguousReturns409 verifies that a reference matching more than one
+// interface on a device produces a 409 whose JSON body lists the matches.
+func TestImpactAmbiguousReturns409(t *testing.T) {
+	srv := NewServer(ambiguousRepo{})
+	q := "?device=rtr-dup&ifName=" + url.QueryEscape("Te0/1/2")
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body %s", rec.Code, rec.Body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body)
+	}
+	matches, ok := out["matches"].([]any)
+	if !ok || len(matches) < 2 {
+		t.Fatalf("expected >=2 'matches', body %s", rec.Body)
 	}
 }
 
