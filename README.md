@@ -139,32 +139,35 @@ make build          # or: go build ./...
 docker run -d --name neo4j -p7687:7687 -p7474:7474 \
   -e NEO4J_AUTH=neo4j/changeme neo4j:5.23
 
+# secrets come from the environment (NEO4J_PASS / SERVICENOW_PASS / NAUTOBOT_TOKEN); never pass them as flags
 export NEO=bolt://localhost:7687
-export NEOPASS=changeme
+export NEO4J_PASS=changeme
+export SERVICENOW_PASS=<your-password>
+export NAUTOBOT_TOKEN=<your-token>
 
 # 3. (Optional) seed application/service nodes from ServiceNow
-./promhash-seed -neo4j $NEO -neo4j-pass $NEOPASS \
+./promhash-seed -neo4j $NEO \
   -servicenow https://example.service-now.com \
-  -servicenow-user "$SN_USER" -servicenow-pass "$SN_PASS"
+  -servicenow-user "$SN_USER"
 
 # 4. Sync the interface catalog from Prometheus (and Nautobot for device names)
-./promhash-catalog -neo4j $NEO -neo4j-pass $NEOPASS \
+./promhash-catalog -neo4j $NEO \
   -prometheus http://prometheus:9090 \
-  -nautobot https://nautobot.example.com -nautobot-token "$NB_TOKEN" \
+  -nautobot https://nautobot.example.com \
   -vendor cisco
 
 # 5. Write a declaration (see "Declaring application paths") into ./declared/payments.yaml,
 #    then validate it (this is what CI runs on a pull request)
-./promhash-loader -dir ./declared -neo4j $NEO -neo4j-pass $NEOPASS -validate-only
+./promhash-loader -dir ./declared -neo4j $NEO -validate-only
 
 # 6. Load it into the graph
-./promhash-loader -dir ./declared -neo4j $NEO -neo4j-pass $NEOPASS -source "$(git rev-parse HEAD)"
+./promhash-loader -dir ./declared -neo4j $NEO -source "$(git rev-parse HEAD)"
 
 # 7. Generate federation + recording-rule artifacts for curated apps
-./promhash-enrich -neo4j $NEO -neo4j-pass $NEOPASS -apps payments -out ./gitops/enrichment
+./promhash-enrich -neo4j $NEO -apps payments -out ./gitops/enrichment
 
 # 8. Serve the graph
-./promhash-api -neo4j $NEO -neo4j-pass $NEOPASS -addr :8080 &
+./promhash-api -neo4j $NEO -addr :8080 &
 
 # 9. Ask the questions
 curl -s localhost:8080/apps
@@ -228,9 +231,9 @@ Field reference:
 
 ## Command-line tools
 
-All tools share the Neo4j connection flags `-neo4j`, `-neo4j-user`, `-neo4j-pass`.
+All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
 
-**Secrets.** To keep credentials out of process listings, each tool reads its secret from the environment when the corresponding flag is empty: `NEO4J_PASS` (all tools), `NAUTOBOT_TOKEN` (`promhash-catalog`), and `SERVICENOW_PASS` (`promhash-seed`). Prefer the environment variables over the flags.
+**Secrets.** To keep credentials out of process listings, each tool reads its secret from the environment: `NEO4J_PASS` (all tools), `NAUTOBOT_TOKEN` (`promhash-catalog`), and `SERVICENOW_PASS` (`promhash-seed`). Always use the environment variables; never pass secrets as flags.
 
 ### `promhash-catalog` — build the interface catalog
 
@@ -239,9 +242,10 @@ Harvests the real interface inventory from Prometheus and binds it to device nam
 ```
 -prometheus      Prometheus base URL                 (default http://localhost:9090)
 -nautobot        Nautobot base URL                   (optional; enables device<->instance mapping)
--nautobot-token  Nautobot API token
 -vendor          default vendor for name canonicalization  (default cisco)
 ```
+
+Nautobot authentication token: set `NAUTOBOT_TOKEN` in the environment.
 
 ### `promhash-seed` — import typed nodes from ServiceNow
 
@@ -250,8 +254,9 @@ One-shot import of application and application-service nodes so declarations res
 ```
 -servicenow       ServiceNow base URL
 -servicenow-user  username
--servicenow-pass  password
 ```
+
+ServiceNow password: set `SERVICENOW_PASS` in the environment.
 
 ### `promhash-loader` — validate and load declarations
 
