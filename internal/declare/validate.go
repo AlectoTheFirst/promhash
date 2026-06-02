@@ -52,7 +52,14 @@ func Validate(a App, r *catalog.Resolver) []error {
 		if err := keySafe("dep.to", dep.To); err != nil {
 			errs = append(errs, fmt.Errorf("app %q: %w", a.App, err))
 		}
-		for pi, p := range dep.Candidates() {
+		candidates := dep.Candidates()
+		if len(candidates) == 0 {
+			errs = append(errs, fmt.Errorf("app %q dep %q: at least one path/paths entry is required", a.App, dep.To))
+		}
+		for pi, p := range candidates {
+			if len(p.Hops) == 0 {
+				errs = append(errs, fmt.Errorf("app %q dep %q path[%d]: must have at least one hop", a.App, dep.To, pi))
+			}
 			for _, h := range p.Hops {
 				if !validDirections[h.Direction] {
 					errs = append(errs, fmt.Errorf(

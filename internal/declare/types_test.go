@@ -1,6 +1,9 @@
 package declare
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const sample = `
 app: payments
@@ -80,5 +83,69 @@ func TestParse(t *testing.T) {
 	}
 	if d.DependsOn[0].Paths[0].Hops[0].If != "Te0/1/2" {
 		t.Fatal("if parse")
+	}
+}
+
+// TestParseUnknownTopLevelField verifies that a typo'd top-level field is
+// rejected rather than silently dropped.
+func TestParseUnknownTopLevelField(t *testing.T) {
+	input := `
+app: payments
+runz_as: payments-api
+owner: team-payments
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unknown field runz_as, got nil")
+	}
+	if !strings.Contains(err.Error(), "runz_as") {
+		t.Fatalf("expected error to name the unknown field, got: %v", err)
+	}
+}
+
+// TestParseUnknownDepField verifies that a typo'd dependency field is rejected.
+func TestParseUnknownDepField(t *testing.T) {
+	input := `
+app: payments
+runs_as: payments-api
+depends_on:
+  - to: ledger-api
+    paht:
+      hops:
+        - {device: rtr-1, if: Te0/0/0, direction: egress}
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unknown field paht, got nil")
+	}
+	if !strings.Contains(err.Error(), "paht") {
+		t.Fatalf("expected error to name the unknown field, got: %v", err)
+	}
+}
+
+// TestParseSampleSingularPath verifies that the existing `sample` (uses paths:)
+// still parses without error after strict mode is enabled.
+func TestParseSampleSingularPath(t *testing.T) {
+	if _, err := Parse([]byte(sample)); err != nil {
+		t.Fatalf("sample should still parse cleanly, got: %v", err)
+	}
+}
+
+// TestParsePathSugarSampleStrictOK verifies that path: and paths: together
+// are still accepted by the strict decoder.
+func TestParsePathSugarSampleStrictOK(t *testing.T) {
+	if _, err := Parse([]byte(pathSugarSample)); err != nil {
+		t.Fatalf("pathSugarSample should still parse cleanly, got: %v", err)
+	}
+}
+
+// TestParseEmptyInput verifies that an empty byte slice returns a clear error.
+func TestParseEmptyInput(t *testing.T) {
+	_, err := Parse([]byte(""))
+	if err == nil {
+		t.Fatal("expected error for empty input, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("expected error to mention 'empty', got: %v", err)
 	}
 }

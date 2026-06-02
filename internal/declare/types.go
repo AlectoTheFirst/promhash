@@ -5,7 +5,14 @@
 // resolved into persisted graph edges.
 package declare
 
-import "gopkg.in/yaml.v3"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+
+	"gopkg.in/yaml.v3"
+)
 
 // Hop is a single device/interface step along a declared network path.
 type Hop struct {
@@ -49,8 +56,18 @@ func (d Dependency) Candidates() []Path {
 }
 
 // Parse unmarshals the YAML bytes of a single declaration into an App.
+// It uses a strict decoder that rejects any field not present in the
+// App/Dependency/Path/Hop structs, so typo'd keys (e.g. runz_as, paht)
+// are caught at parse time rather than silently dropped.
 func Parse(b []byte) (App, error) {
 	var a App
-	err := yaml.Unmarshal(b, &a)
-	return a, err
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&a); err != nil {
+		if errors.Is(err, io.EOF) {
+			return App{}, fmt.Errorf("empty declaration")
+		}
+		return App{}, err
+	}
+	return a, nil
 }
