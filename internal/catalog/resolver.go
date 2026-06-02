@@ -17,9 +17,15 @@ type NoMatchError struct {
 	Suggestions []string
 }
 
-// Error implements the error interface, naming the device, the unmatched
-// reference, and the suggested interface names.
+// Error implements the error interface, naming the device and the unmatched
+// reference. When suggestions are available (known device with interfaces) it
+// appends a "did you mean" hint; when there are no suggestions it reports that
+// no interfaces are known for the device.
 func (e *NoMatchError) Error() string {
+	if len(e.Suggestions) == 0 {
+		return fmt.Sprintf("no interface on %q matches %q (no interfaces known for this device)",
+			e.Device, e.Ref)
+	}
 	return fmt.Sprintf("no interface on %q matches %q; did you mean: %s",
 		e.Device, e.Ref, strings.Join(e.Suggestions, ", "))
 }

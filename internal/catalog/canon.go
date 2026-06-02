@@ -9,13 +9,16 @@ import (
 	"strings"
 )
 
-// abbrev maps short vendor forms to long; applied longest-prefix-first.
+// abbrev maps short vendor forms to their canonical long form. Matching is an
+// exact equality check on the entire leading alpha token (the full [a-z]+ run);
+// the first matching entry wins.
 var abbrev = []struct{ short, long string }{
-	{"tengige", "tengige"}, {"te", "tengige"},
-	{"gigabitethernet", "gigabitethernet"}, {"gi", "gigabitethernet"},
-	{"ethernet", "ethernet"}, {"eth", "ethernet"},
-	{"fastethernet", "fastethernet"}, {"fa", "fastethernet"},
-	{"hundredgige", "hundredgige"}, {"hu", "hundredgige"},
+	{"te", "tengige"},
+	{"gi", "gigabitethernet"},
+	{"eth", "ethernet"},
+	{"et", "ethernet"},
+	{"fa", "fastethernet"},
+	{"hu", "hundredgige"},
 }
 
 var prefixRe = regexp.MustCompile(`^([a-z]+)(.*)$`)

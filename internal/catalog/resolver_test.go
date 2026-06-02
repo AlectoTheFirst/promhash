@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/AlectoTheFirst/promhash/internal/graph"
@@ -164,6 +165,64 @@ func TestResolveNonEmptyRefDoesNotMatchEmptyStoredAlias(t *testing.T) {
 	}
 	if got.PHash != "interface:full" {
 		t.Errorf("Resolve(rtr1, uplink): got PHash %q; want interface:full", got.PHash)
+	}
+}
+
+// TestResolveAristaEtAbbrev verifies that "Et1" resolves to the same interface
+// as "Ethernet1" when the catalog stores MetricIfName "Ethernet1" (i.e. the
+// et->ethernet abbreviation actually drives interface selection).
+func TestResolveAristaEtAbbrev(t *testing.T) {
+	ifaces := []graph.Iface{
+		{PHash: "interface:arista1", Device: "sw-arista-1", Vendor: "arista",
+			IfName: "ethernet1", MetricIfName: "Ethernet1", IfDescr: "Ethernet1"},
+	}
+	r := NewResolver(ifaces)
+	for _, ref := range []string{"Et1", "Eth1", "Ethernet1"} {
+		got, err := r.Resolve("sw-arista-1", ref)
+		if err != nil {
+			t.Errorf("Resolve(%q, %q) unexpected error: %v", "sw-arista-1", ref, err)
+			continue
+		}
+		if got.PHash != "interface:arista1" {
+			t.Errorf("Resolve(%q, %q) PHash = %q; want interface:arista1", "sw-arista-1", ref, got.PHash)
+		}
+	}
+}
+
+// TestNoMatchErrorUnknownDevice verifies that resolving an unknown device
+// produces a *NoMatchError whose Error() message does NOT contain the dangling
+// "did you mean:" clause, and instead communicates that no interfaces are known.
+func TestNoMatchErrorUnknownDevice(t *testing.T) {
+	r := NewResolver(cat())
+	_, err := r.Resolve("no-such-device", "Te0/1")
+	var nm *NoMatchError
+	if !errors.As(err, &nm) {
+		t.Fatalf("want *NoMatchError, got %v", err)
+	}
+	msg := nm.Error()
+	if strings.Contains(msg, "did you mean:") {
+		t.Errorf("unknown-device error should not contain 'did you mean:'; got: %q", msg)
+	}
+	if !strings.Contains(msg, "no interfaces known") {
+		t.Errorf("unknown-device error should mention 'no interfaces known'; got: %q", msg)
+	}
+}
+
+// TestNoMatchErrorKnownDeviceBadRef verifies that resolving a known device with
+// a nonexistent ref yields a *NoMatchError with non-empty Suggestions and an
+// Error() message that contains "did you mean".
+func TestNoMatchErrorKnownDeviceBadRef(t *testing.T) {
+	r := NewResolver(cat())
+	_, err := r.Resolve("rtr-core-1", "Zz9/9/9")
+	var nm *NoMatchError
+	if !errors.As(err, &nm) {
+		t.Fatalf("want *NoMatchError, got %v", err)
+	}
+	if len(nm.Suggestions) == 0 {
+		t.Fatal("expected non-empty Suggestions for known device")
+	}
+	if !strings.Contains(nm.Error(), "did you mean") {
+		t.Errorf("known-device no-match error should contain 'did you mean'; got: %q", nm.Error())
 	}
 }
 
