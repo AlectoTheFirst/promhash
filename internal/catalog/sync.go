@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/AlectoTheFirst/promhash/internal/graph"
@@ -16,25 +17,42 @@ func ifacePHash(device, canonicalIfName string) string {
 
 // Sync turns harvested Prometheus rows into Interface nodes, keyed by canonical
 // (device, ifName), binding the real metric labels and current ifIndex.
+// Rows whose normalized device or canonical ifName contain ':' or control
+// characters are skipped with a warning rather than aborting the batch.
 func Sync(ctx context.Context, r *graph.Repo, rows []promclient.IfaceRow,
 	devByInstance map[string]string, vendor string) error {
 	now := time.Now().UTC()
+	var skipped int
 	for _, row := range rows {
-		device := devByInstance[row.Instance]
-		if device == "" {
-			device = row.Instance
+		raw := devByInstance[row.Instance]
+		if raw == "" {
+			raw = row.Instance
 		} // fall back to instance if unmapped
+		dev := phash.NormDevice(raw)
 		canon := CanonicalIfName(vendor, row.IfName)
 		if canon == "" {
 			canon = CanonicalIfName(vendor, row.IfDescr)
 		}
+		if err := phash.SafeKey("device", dev); err != nil {
+			log.Printf("catalog.Sync: skipping row (instance=%q): %v", row.Instance, err)
+			skipped++
+			continue
+		}
+		if err := phash.SafeKey("ifName", canon); err != nil {
+			log.Printf("catalog.Sync: skipping row (instance=%q ifName=%q): %v", row.Instance, canon, err)
+			skipped++
+			continue
+		}
 		ifc := graph.Iface{
-			PHash: ifacePHash(device, canon), Device: device, IfName: canon,
+			PHash: ifacePHash(dev, canon), Device: dev, IfName: canon,
 			MetricIfName: row.IfName, IfDescr: row.IfDescr, IfAlias: row.IfAlias,
 			Instance: row.Instance, Vendor: vendor, IfIndex: row.IfIndex, ObservedAt: now}
 		if err := r.UpsertInterface(ctx, ifc); err != nil {
 			return err
 		}
+	}
+	if skipped > 0 {
+		log.Printf("catalog.Sync: skipped %d row(s) with invalid device/ifName", skipped)
 	}
 	return nil
 }

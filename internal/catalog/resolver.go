@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/AlectoTheFirst/promhash/internal/graph"
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 // NoMatchError reports that no interface on the device matched the requested
@@ -41,19 +42,24 @@ func (e *AmbiguousError) Error() string {
 type Resolver struct{ byDevice map[string][]graph.Iface }
 
 // NewResolver builds a Resolver from the given interfaces, grouping them by
-// their Device for subsequent Resolve calls.
+// their normalized Device for subsequent Resolve calls. Normalization uses
+// phash.NormDevice (lower+trim), matching what Sync stores and what Hash
+// applies, so look-ups are case/whitespace-insensitive.
 func NewResolver(ifaces []graph.Iface) *Resolver {
 	m := map[string][]graph.Iface{}
 	for _, i := range ifaces {
-		m[i.Device] = append(m[i.Device], i)
+		key := phash.NormDevice(i.Device)
+		m[key] = append(m[key], i)
 	}
 	return &Resolver{byDevice: m}
 }
 
 // Resolve maps (device, human ref) to exactly one catalog interface, matching
 // against canonical ifName, ifDescr, or ifAlias. Zero/many matches fail loud.
+// The device argument is normalized before lookup so callers may pass any
+// case/whitespace variant of the device name.
 func (r *Resolver) Resolve(device, ref string) (graph.Iface, error) {
-	list := r.byDevice[device]
+	list := r.byDevice[phash.NormDevice(device)]
 	want := CanonicalIfName("", ref)
 	refLower := strings.ToLower(strings.TrimSpace(ref))
 	var hits []graph.Iface

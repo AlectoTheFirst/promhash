@@ -30,3 +30,66 @@ func TestSyncUpsertsInterfaces(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// TestSyncCaseVariantsCollapseToOneNode verifies that two Sync calls for the
+// same interface whose device names differ only in case — "Rtr1" and "rtr1" —
+// produce exactly ONE Interface node (same phash), and that a Resolver built
+// from ListAllInterfaces resolves either casing to that node.
+func TestSyncCaseVariantsCollapseToOneNode(t *testing.T) {
+	ctx := context.Background()
+	drv, cleanup := testutil.Neo4j(t, ctx)
+	defer cleanup()
+	r := graph.New(drv, "neo4j")
+	_ = r.EnsureConstraints(ctx)
+
+	row := promclient.IfaceRow{
+		Instance: "10.0.0.2", IfName: "Te0/1/0", IfDescr: "TenGigE0/1/0",
+		IfAlias: "uplink-core", IfIndex: 1,
+	}
+
+	// First sync with uppercase device name.
+	if err := Sync(ctx, r, []promclient.IfaceRow{row},
+		map[string]string{"10.0.0.2": "Rtr1"}, "cisco"); err != nil {
+		t.Fatal(err)
+	}
+	// Second sync with lowercase device name — must collapse to same node.
+	if err := Sync(ctx, r, []promclient.IfaceRow{row},
+		map[string]string{"10.0.0.2": "rtr1"}, "cisco"); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := r.ListAllInterfaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Filter to just the nodes for this device/interface.
+	var matches []graph.Iface
+	wantPHash := ifacePHash("rtr1", "tengige0/1/0")
+	for _, ifc := range all {
+		if ifc.PHash == wantPHash {
+			matches = append(matches, ifc)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 node with phash %q; got %d node(s): %+v",
+			wantPHash, len(matches), matches)
+	}
+	// Stored device must be the normalized form.
+	if matches[0].Device != "rtr1" {
+		t.Errorf("stored Device = %q; want %q", matches[0].Device, "rtr1")
+	}
+
+	// Resolver must return the node for either casing.
+	res := NewResolver(all)
+	for _, dev := range []string{"rtr1", "Rtr1", "  RTR1  "} {
+		got, err := res.Resolve(dev, "Te0/1/0")
+		if err != nil {
+			t.Errorf("Resolve(%q): %v", dev, err)
+			continue
+		}
+		if got.PHash != wantPHash {
+			t.Errorf("Resolve(%q): PHash = %q; want %q", dev, got.PHash, wantPHash)
+		}
+	}
+}

@@ -82,6 +82,45 @@ func TestHashKindDisjoint(t *testing.T) {
 // single part ("ab") hashes to "ab" — genuinely different inputs that must
 // produce different ids. The same holds for any re-grouping of the same
 // concatenated characters across the part boundary.
+func TestNormDevice(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Rtr1", "rtr1"},
+		{"  RTR1  ", "rtr1"},
+		{"rtr1", "rtr1"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := NormDevice(tc.in); got != tc.want {
+			t.Errorf("NormDevice(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestNormDeviceMatchesHash(t *testing.T) {
+	// The whole point: NormDevice("Rtr1") == the normalization Hash applies,
+	// so NormDevice(x) as a map key is always equal to Hash's internal key.
+	a := Hash(KindIface, "Rtr1", "te0/1/2")
+	b := Hash(KindIface, NormDevice("Rtr1"), "te0/1/2")
+	if a != b {
+		t.Fatalf("NormDevice diverges from Hash normalization: %q vs %q", a, b)
+	}
+}
+
+func TestSafeKey(t *testing.T) {
+	if err := SafeKey("f", "valid-name"); err != nil {
+		t.Errorf("unexpected error for valid value: %v", err)
+	}
+	if err := SafeKey("f", "a:b"); err == nil {
+		t.Error("expected error for colon, got nil")
+	}
+	if err := SafeKey("f", "a\x01b"); err == nil {
+		t.Error("expected error for control char, got nil")
+	}
+	if err := SafeKey("f", "a\nb"); err == nil {
+		t.Error("expected error for newline control char, got nil")
+	}
+}
+
 func TestHashSeparatorPreventsPartBoundaryCollision(t *testing.T) {
 	// Two-part key vs single-part key with the same concatenated characters.
 	twoParts := Hash(KindDevice, "a", "b")

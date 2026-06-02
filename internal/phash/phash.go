@@ -8,7 +8,9 @@ package phash
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Kind identifies the category of entity an id refers to. It is mixed into the
@@ -29,6 +31,30 @@ const (
 	KindCustomer Kind = "customer"
 	KindSegment  Kind = "segment"
 )
+
+// NormDevice returns the canonical form of a device name as applied by Hash:
+// lowercased and leading/trailing whitespace trimmed. Store and lookup must
+// both call NormDevice so that the stored key, the hash input, and the lookup
+// key are always identical.
+func NormDevice(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// SafeKey returns an error if value contains ':' or any Unicode control
+// character. Both would corrupt the ':'-delimited identity key scheme used
+// by Hash and the rest of the catalog pipeline. Apply before storing any
+// device or interface name.
+func SafeKey(field, value string) error {
+	if strings.ContainsRune(value, ':') {
+		return fmt.Errorf("%s %q: must not contain ':'", field, value)
+	}
+	for _, c := range value {
+		if unicode.IsControl(c) {
+			return fmt.Errorf("%s %q: must not contain control characters", field, value)
+		}
+	}
+	return nil
+}
 
 // Hash returns a stable id "kind:<16 hex>" over case/space-normalized parts.
 func Hash(k Kind, parts ...string) string {
