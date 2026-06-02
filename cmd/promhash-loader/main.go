@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,18 +24,37 @@ func main() {
 }
 
 func run() error {
-	var dir, neoURL, neoUser, neoPass, sha string
+	var dir, neoURL, neoUser, neoPass, sha, commitTimeStr string
 	var validateOnly bool
 	flag.StringVar(&dir, "dir", "declared", "directory of *.yaml declarations")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
 	flag.StringVar(&sha, "source", "manual", "git sha for provenance")
+	flag.StringVar(&commitTimeStr, "commit-time", "", "RFC3339 git commit time to use as validFrom base (overrides GIT_COMMIT_TIME env)")
 	flag.BoolVar(&validateOnly, "validate-only", false, "CI gate: validate, do not write")
 	flag.Parse()
 	if neoPass == "" {
 		neoPass = os.Getenv("NEO4J_PASS")
 	}
+	if commitTimeStr == "" {
+		commitTimeStr = os.Getenv("GIT_COMMIT_TIME")
+	}
+
+	// Determine the validFrom base: prefer commit time (from flag or env) so
+	// reloads are anchored to the git history rather than wall clock; fall back
+	// to time.Now() for manual / legacy runs.
+	var now time.Time
+	if commitTimeStr != "" {
+		parsed, err := time.Parse(time.RFC3339, commitTimeStr)
+		if err != nil {
+			return fmt.Errorf("invalid commit-time %q: %w", commitTimeStr, err)
+		}
+		now = parsed.UTC()
+	} else {
+		now = time.Now().UTC()
+	}
+
 	ctx := context.Background()
 	drv, err := neo4j.NewDriverWithContext(neoURL, neo4j.BasicAuth(neoUser, neoPass, ""))
 	if err != nil {
@@ -51,7 +71,6 @@ func run() error {
 	}
 	res := catalog.NewResolver(cat)
 	files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
-	now := time.Now().UTC()
 	var failed bool
 	for _, f := range files {
 		b, err := os.ReadFile(f)
