@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AlectoTheFirst/promhash/internal/catalog"
@@ -144,12 +145,16 @@ func writeImpact(w http.ResponseWriter, device, ifName string, rows []graph.Impa
 // params. The ifName may be in any recognized form (canonical, metric, alias,
 // description); the catalog resolver maps it to a canonical phash server-side.
 func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
+	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
+	if strings.TrimSpace(device) == "" || strings.TrimSpace(ifName) == "" {
+		http.Error(w, "device and ifName are required", http.StatusBadRequest)
+		return
+	}
 	t, ok := at(r)
 	if !ok {
 		http.Error(w, "invalid at parameter", http.StatusBadRequest)
 		return
 	}
-	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
 	rows, _, err := s.lookupImpact(r.Context(), device, ifName, t)
 	if err != nil {
 		var noMatch *catalog.NoMatchError

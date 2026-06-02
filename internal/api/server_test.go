@@ -313,3 +313,96 @@ func TestAtParamInvalid(t *testing.T) {
 		t.Fatalf("code %d body %s", rec.Code, rec.Body)
 	}
 }
+
+// accessTrackingRepo embeds fakeRepo and records whether ListAllInterfaces or
+// InterfaceImpact was called. Both methods use pointer receivers so the flags
+// are visible on the same *accessTrackingRepo after the call.
+type accessTrackingRepo struct {
+	fakeRepo
+	listAllInterfacesCalled bool
+	interfaceImpactCalled   bool
+}
+
+func (r *accessTrackingRepo) ListAllInterfaces(ctx context.Context) ([]graph.Iface, error) {
+	r.listAllInterfacesCalled = true
+	return r.fakeRepo.ListAllInterfaces(ctx)
+}
+
+func (r *accessTrackingRepo) InterfaceImpact(ctx context.Context, p string, t time.Time) ([]graph.ImpactRow, error) {
+	r.interfaceImpactCalled = true
+	return r.fakeRepo.InterfaceImpact(ctx, p, t)
+}
+
+// TestImpactEmptyDeviceRejected asserts that an empty device param yields 400
+// and that no repo methods are called (guard fires before any catalog access).
+func TestImpactEmptyDeviceRejected(t *testing.T) {
+	repo := &accessTrackingRepo{}
+	srv := NewServer(repo)
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact?device=&ifName=Gi0", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body %s", rec.Code, rec.Body)
+	}
+	if repo.listAllInterfacesCalled {
+		t.Fatal("ListAllInterfaces was called — guard must short-circuit before repo access")
+	}
+	if repo.interfaceImpactCalled {
+		t.Fatal("InterfaceImpact was called — guard must short-circuit before repo access")
+	}
+}
+
+// TestImpactEmptyIfNameRejected asserts that an empty ifName param yields 400
+// and that no repo methods are called.
+func TestImpactEmptyIfNameRejected(t *testing.T) {
+	repo := &accessTrackingRepo{}
+	srv := NewServer(repo)
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact?device=rtr-core-1&ifName=", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body %s", rec.Code, rec.Body)
+	}
+	if repo.listAllInterfacesCalled {
+		t.Fatal("ListAllInterfaces was called — guard must short-circuit before repo access")
+	}
+	if repo.interfaceImpactCalled {
+		t.Fatal("InterfaceImpact was called — guard must short-circuit before repo access")
+	}
+}
+
+// TestImpactEmptyDeviceRejectedViaAlias asserts that /interface-apps inherits
+// the guard from the impact handler and also returns 400 for an empty device.
+func TestImpactEmptyDeviceRejectedViaAlias(t *testing.T) {
+	repo := &accessTrackingRepo{}
+	srv := NewServer(repo)
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/interface-apps?device=&ifName=Gi0", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 from /interface-apps alias, got %d body %s", rec.Code, rec.Body)
+	}
+	if repo.listAllInterfacesCalled {
+		t.Fatal("ListAllInterfaces was called — guard must short-circuit before repo access")
+	}
+	if repo.interfaceImpactCalled {
+		t.Fatal("InterfaceImpact was called — guard must short-circuit before repo access")
+	}
+}
+
+// TestImpactWhitespaceOnlyDeviceRejected asserts that a whitespace-only device
+// (%20) is treated as empty and rejected with 400.
+func TestImpactWhitespaceOnlyDeviceRejected(t *testing.T) {
+	repo := &accessTrackingRepo{}
+	srv := NewServer(repo)
+	rec := httptest.NewRecorder()
+	// %20 = a single space
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact?device=%20&ifName=Gi0", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for whitespace-only device, got %d body %s", rec.Code, rec.Body)
+	}
+	if repo.listAllInterfacesCalled {
+		t.Fatal("ListAllInterfaces was called — guard must short-circuit before repo access")
+	}
+}
