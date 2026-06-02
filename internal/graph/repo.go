@@ -54,6 +54,9 @@ func (r *Repo) EnsureConstraints(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := r.write(ctx, `CREATE CONSTRAINT app_name_unique IF NOT EXISTS FOR (a:Application) REQUIRE a.name IS UNIQUE`, nil); err != nil {
+		return err
+	}
 	return nil
 }
 
