@@ -108,9 +108,13 @@ func ifaceFromProps(p map[string]any) Iface {
 		}
 		return 0
 	}
-	return Iface{PHash: gs("phash"), Device: gs("device"), IfName: gs("ifName"),
+	out := Iface{PHash: gs("phash"), Device: gs("device"), IfName: gs("ifName"),
 		MetricIfName: gs("metricIfName"), IfDescr: gs("ifDescr"), IfAlias: gs("ifAlias"),
 		Instance: gs("instance"), Vendor: gs("vendor"), IfIndex: gi("ifIndex")}
+	if v, ok := p["observedAt"].(int64); ok {
+		out.ObservedAt = time.Unix(v, 0).UTC()
+	}
+	return out
 }
 
 // DeclaredHop is a resolved hop ready to persist.

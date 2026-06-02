@@ -71,5 +71,14 @@ func main() {
 	if err := catalog.Sync(ctx, r, rows, inv, vendor); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("catalog sync: %d interfaces (%d rows skipped: bad ifIndex)", len(rows), skipped)
+	ifaces, err := r.ListAllInterfaces(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	oldest := catalog.OldestObservedAt(ifaces)
+	oldestStr := "n/a"
+	if !oldest.IsZero() {
+		oldestStr = oldest.Format(time.RFC3339)
+	}
+	log.Printf("catalog sync: %d interfaces (%d skipped), oldest observedAt %s", len(rows), skipped, oldestStr)
 }
