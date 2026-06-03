@@ -99,9 +99,17 @@ func pathHealthRules(jk JoinKey) []pathHealthRule {
 		// Because app:if_capacity_bps has no series where capacity is absent/zero,
 		// the division yields no series there either (rather than +Inf), so the
 		// ratio is implicitly capacity-gated.
+		//
+		// ignoring(direction): the egress-rate numerator carries direction="egress"
+		// (from its group_right join against promhash_interface_app{direction="egress"}),
+		// but app:if_capacity_bps has no direction label (it was collapsed via
+		// max without(direction)(…) to avoid duplicating capacity for ingress/egress).
+		// Without ignoring(direction), Prometheus default one-to-one matching requires
+		// identical label sets and the division yields ZERO series. The result is
+		// direction-less, which is correct: utilization is a per-interface property.
 		{
 			Record: "app:if_util:ratio",
-			Expr:   "app:if_egress_octets:rate5m * 8 / app:if_capacity_bps",
+			Expr:   "app:if_egress_octets:rate5m * 8 / ignoring(direction) app:if_capacity_bps",
 		},
 		// Per-path (per app,service) worst-hop utilization. MAX, never sum/avg:
 		// a path is only as healthy as its most-congested hop.

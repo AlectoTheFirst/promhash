@@ -353,6 +353,46 @@ app:if_egress_octets:rate5m{app="payments", service="svc", iface="10.0.0.1:7"} 1
 	}
 }
 
+// TestPathHealth_UtilRatioDivisionProducesValue asserts that the util division
+// correctly matches across the direction label mismatch between numerator and
+// denominator. The egress-rate series carries direction="egress"; the capacity
+// series has NO direction label (collapsed via max without(direction)). Without
+// ignoring(direction), Prometheus default one-to-one matching would silently
+// produce ZERO series. With ignoring(direction) it must yield exactly ONE series
+// with value 0.5 (1000 bytes/s * 8 / 16000 bps) and NO direction label.
+func TestPathHealth_UtilRatioDivisionProducesValue(t *testing.T) {
+	const load = `load 1m
+app:if_egress_octets:rate5m{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7",direction="egress"} 1000+0x6
+app:if_capacity_bps{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7"} 16000+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:if_util:ratio")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected exactly 1 util series (ignoring(direction) must bridge the label mismatch), got %d: %v", len(vec), vec)
+	}
+
+	const wantVal = 0.5 // 1000 * 8 / 16000
+	if got := vec[0].F; got != wantVal {
+		t.Errorf("app:if_util:ratio = %v, want %v (1000 bytes/s * 8 / 16000 bps)", got, wantVal)
+	}
+
+	lm := labelMapFromLabels(vec[0].Metric)
+	if _, ok := lm["direction"]; ok {
+		t.Errorf("result must NOT carry direction label (utilization is per-iface, not per-direction); got labels: %v", lm)
+	}
+	// Confirm the identity labels are present.
+	for k, want := range map[string]string{
+		"app":     "payments",
+		"service": "svc",
+		"iface":   "10.0.0.1:7",
+	} {
+		if lm[k] != want {
+			t.Errorf("label %q = %q, want %q (labels: %v)", k, lm[k], want, lm)
+		}
+	}
+}
+
 // TestPathHealth_JoinByIfNameRendersInstanceIfName is a smoke test that the
 // JoinByIfName variant joins on(instance, ifName) and still carries the labels.
 func TestPathHealth_JoinByIfNameRendersInstanceIfName(t *testing.T) {
