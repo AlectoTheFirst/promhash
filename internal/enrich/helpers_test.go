@@ -111,6 +111,27 @@ func TestIfaceSelectors(t *testing.T) {
 			t.Errorf("got %v, want empty slice", got)
 		}
 	})
+
+	t.Run("numeric_ifindex_order_within_instance", func(t *testing.T) {
+		// ifIndexes 100, 9, 42 must sort numerically (9 < 42 < 100),
+		// not lexically ("100" < "42" < "9").
+		hops := []graph.Hop{
+			{Instance: "10.0.0.1", IfIndex: 100},
+			{Instance: "10.0.0.1", IfIndex: 9},
+			{Instance: "10.0.0.1", IfIndex: 42},
+		}
+		got := IfaceSelectors(hops)
+
+		want := []string{"10.0.0.1:9", "10.0.0.1:42", "10.0.0.1:100"}
+		if len(got) != len(want) {
+			t.Fatalf("len: got %d (%v), want %d (%v)", len(got), got, len(want), want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("[%d]: got %q, want %q (full: %v)", i, got[i], want[i], got)
+			}
+		}
+	})
 }
 
 // TestLabelValueEscape_RoundTrip proves that labelValueEscape produces valid

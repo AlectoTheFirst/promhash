@@ -1,6 +1,8 @@
 package enrich
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,15 +53,28 @@ func Selectors(hops []graph.Hop) (instances []string, ifIndexes []string) {
 // The slice is non-nil even when hops is empty, so it marshals to a JSON array
 // rather than null.
 func IfaceSelectors(hops []graph.Hop) []string {
-	seen := map[string]struct{}{}
+	type pair struct {
+		instance string
+		ifIndex  int
+	}
+	seen := map[pair]struct{}{}
 	for _, h := range hops {
-		seen[h.Instance+":"+strconv.Itoa(h.IfIndex)] = struct{}{}
+		seen[pair{h.Instance, h.IfIndex}] = struct{}{}
 	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
+	pairs := make([]pair, 0, len(seen))
+	for p := range seen {
+		pairs = append(pairs, p)
 	}
-	sort.Strings(out)
+	slices.SortFunc(pairs, func(a, b pair) int {
+		if c := cmp.Compare(a.instance, b.instance); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ifIndex, b.ifIndex)
+	})
+	out := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, p.instance+":"+strconv.Itoa(p.ifIndex))
+	}
 	return out
 }
 
