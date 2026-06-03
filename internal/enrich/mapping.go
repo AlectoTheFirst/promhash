@@ -62,7 +62,7 @@ type dedupKey struct {
 // one point per direction.
 //
 // The returned slice is deterministically sorted by (direction, instance,
-// ifIndex) and is non-nil even when empty.
+// ifIndex, app, service) and is non-nil even when empty.
 //
 // jk is threaded for downstream use by RA2/RA4; it does not alter point
 // contents in RA1 since both IfName and Iface are always populated.
@@ -70,7 +70,7 @@ func MappingSeries(app, service string, hops []graph.Hop, jk JoinKey) []MappingP
 	_ = jk // inert in RA1; see JoinKey doc
 
 	seen := map[dedupKey]struct{}{}
-	var pts []MappingPoint
+	pts := make([]MappingPoint, 0, len(hops))
 
 	emit := func(h graph.Hop, dir string) {
 		k := dedupKey{instance: h.Instance, ifIndex: h.IfIndex, app: app, direction: dir}
@@ -103,8 +103,11 @@ func MappingSeries(app, service string, hops []graph.Hop, jk JoinKey) []MappingP
 	return pts
 }
 
-// sortPoints sorts a slice of MappingPoints in place by (direction, instance,
-// ifIndex). This gives a deterministic output order independent of hop sequence.
+// sortPoints sorts a slice of MappingPoints in place by
+// (direction, instance, ifIndex, app, service). The comparator is a total
+// order over all distinct MappingPoint values, so sort.Slice (which is not
+// stable) still produces a deterministic result even when slices from
+// multiple apps are concatenated before sorting.
 func sortPoints(pts []MappingPoint) {
 	sort.Slice(pts, func(i, j int) bool {
 		a, b := pts[i], pts[j]
@@ -114,7 +117,13 @@ func sortPoints(pts []MappingPoint) {
 		if a.Instance != b.Instance {
 			return a.Instance < b.Instance
 		}
-		return a.IfIndex < b.IfIndex
+		if a.IfIndex != b.IfIndex {
+			return a.IfIndex < b.IfIndex
+		}
+		if a.App != b.App {
+			return a.App < b.App
+		}
+		return a.Service < b.Service
 	})
 }
 
@@ -124,12 +133,16 @@ func sortPoints(pts []MappingPoint) {
 //	promhash_interface_app{app="…",service="…",device="…",ifName="…",instance="…",ifIndex="N",iface="inst:idx",direction="…"} 1
 //
 // Label values are escaped using labelValueEscape. Lines end with \n. The
-// output is deterministic because the input should already be sorted by
-// sortPoints (called by MappingSeries), but if callers concatenate slices they
-// should sort the combined slice themselves before rendering.
+// output is deterministic regardless of the order in which points are
+// supplied: RenderMappingSeries sorts a local copy by the total order
+// (direction, instance, ifIndex, app, service) before emitting.
 func RenderMappingSeries(points []MappingPoint) string {
+	sorted := make([]MappingPoint, len(points))
+	copy(sorted, points)
+	sortPoints(sorted)
+
 	var b strings.Builder
-	for _, p := range points {
+	for _, p := range sorted {
 		fmt.Fprintf(&b, `promhash_interface_app{app="%s",service="%s",device="%s",ifName="%s",instance="%s",ifIndex="%d",iface="%s",direction="%s"} 1`+"\n",
 			labelValueEscape(p.App),
 			labelValueEscape(p.Service),

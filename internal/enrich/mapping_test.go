@@ -204,6 +204,57 @@ func TestMappingSeries_DistinctIfaceForSameIfIndexDifferentInstances(t *testing.
 	}
 }
 
+// Test 5 – RenderMappingSeries is deterministic across app concatenation order.
+//
+// Build MappingSeries for two apps ("payments", "ledger") over the same shared
+// hop. Concatenate in both orders (payments+ledger and ledger+payments) and
+// render each concatenation. The two rendered strings must be byte-identical,
+// proving that the render-side sort produces a stable, order-independent result.
+func TestRenderMappingSeriesDeterministicAcrossApps(t *testing.T) {
+	sharedHop := graph.Hop{
+		Instance: "10.0.0.1", IfIndex: 7, MetricIfName: "eth1", Device: "core1",
+		Direction: "transit", Seq: 1,
+	}
+
+	ptsPay := MappingSeries("payments", "pay-svc", []graph.Hop{sharedHop}, JoinByComposite)
+	ptsLed := MappingSeries("ledger", "led-svc", []graph.Hop{sharedHop}, JoinByComposite)
+
+	// Concatenate in both orders; do NOT sort the combined slice — the render
+	// function must handle that internally.
+	orderA := append(append([]MappingPoint{}, ptsPay...), ptsLed...)
+	orderB := append(append([]MappingPoint{}, ptsLed...), ptsPay...)
+
+	renderedA := RenderMappingSeries(orderA)
+	renderedB := RenderMappingSeries(orderB)
+
+	if renderedA != renderedB {
+		t.Errorf("render output differs by concatenation order:\n--- payments+ledger ---\n%s\n--- ledger+payments ---\n%s", renderedA, renderedB)
+	}
+	if renderedA == "" {
+		t.Error("rendered output is empty; expected at least one line")
+	}
+}
+
+// Test 6 – MappingSeries returns a non-nil slice when there are no hops.
+//
+// An empty result must marshal to JSON array `[]`, not `null`. Callers that
+// range over the result or pass it to json.Marshal should never see nil.
+func TestMappingSeries_EmptyHopsNonNilSlice(t *testing.T) {
+	pts := MappingSeries("payments", "svc", nil, JoinByComposite)
+	if pts == nil {
+		t.Fatal("MappingSeries returned nil for empty hops; want non-nil []MappingPoint{}")
+	}
+	if len(pts) != 0 {
+		t.Fatalf("expected 0 points for empty hops, got %d: %+v", len(pts), pts)
+	}
+
+	// Also verify with an explicitly empty (non-nil) hop slice.
+	pts2 := MappingSeries("payments", "svc", []graph.Hop{}, JoinByComposite)
+	if pts2 == nil {
+		t.Fatal("MappingSeries returned nil for empty []graph.Hop{}; want non-nil []MappingPoint{}")
+	}
+}
+
 // --- helpers ---
 
 type labelMap map[string]string
