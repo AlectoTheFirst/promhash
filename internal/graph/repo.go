@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -188,12 +189,14 @@ func upsertDeclaredAppTx(ctx context.Context, tx neo4j.ManagedTransaction, d Dec
            MERGE (target:ApplicationService {phash:dep.toPHash}) SET target.name=dep.to
            MERGE (svc)-[do:DEPENDS_ON {provenance:'declared', source:$source, validFrom:$validFrom}]->(target)
              SET do.confidence=$confidence, do.observedAt=$observedAt, do.validTo=null
-           CREATE (conn:Connection {provenance:'declared', source:$source, confidence:$confidence,
-                 observedAt:$observedAt, validFrom:$validFrom, validTo:null})
+           MERGE (conn:Connection {phash:dep.connPHash})
+             SET conn.provenance='declared', conn.source=$source, conn.confidence=$confidence,
+                 conn.observedAt=$observedAt, conn.validFrom=$validFrom, conn.validTo=null
            MERGE (svc)-[:USES]->(conn) MERGE (conn)-[:TO_SVC]->(target)
            WITH conn, dep
            UNWIND dep.paths AS p
-             CREATE (path:Path {provenance:'declared', source:$source})
+             MERGE (path:Path {phash:p.pathPHash})
+               SET path.provenance='declared', path.source=$source
              MERGE (conn)-[tk:TAKES {provenance:'declared', source:$source, validFrom:$validFrom}]->(path)
                SET tk.validTo=null, tk.confidence=$confidence, tk.observedAt=$observedAt
              WITH path, p
@@ -206,7 +209,7 @@ func upsertDeclaredAppTx(ctx context.Context, tx neo4j.ManagedTransaction, d Dec
 			"customers": customersToParams(d.Customers, d.App),
 			"source":    d.Source, "validFrom": d.ValidFrom.Unix(),
 			"confidence": declaredConfidence, "observedAt": d.ValidFrom.Unix(),
-			"deps": depsToParams(d.Deps),
+			"deps": depsToParams(d.AppSvcPHash, d.Deps, d.Source, d.ValidFrom),
 		})
 	if err != nil {
 		return err
@@ -244,18 +247,27 @@ func customersToParams(customers []string, app string) []map[string]any {
 	return out
 }
 
-func depsToParams(deps []DeclaredDep) []map[string]any {
+// depsToParams converts declared dependencies into Cypher parameter maps.
+// Each dep carries a connPHash derived from (svcPHash, targetPHash, source,
+// validFrom) so that Connection nodes are stable across ExecuteWrite retries
+// and identical-params replays. Each path carries a pathPHash derived from
+// (connPHash, pathIndex) for the same reason. Both use phash.Hash so the
+// identity scheme is consistent with the rest of the system.
+func depsToParams(svcPHash string, deps []DeclaredDep, source string, validFrom time.Time) []map[string]any {
+	vfStr := strconv.FormatInt(validFrom.Unix(), 10)
 	out := make([]map[string]any, 0, len(deps))
 	for _, dep := range deps {
+		connPHash := phash.Hash(phash.KindConnection, svcPHash, dep.ToAppSvc, source, vfStr)
 		paths := make([]map[string]any, 0, len(dep.Paths))
-		for _, p := range dep.Paths {
+		for i, p := range dep.Paths {
+			pathPHash := phash.Hash(phash.KindPath, connPHash, strconv.Itoa(i))
 			hops := make([]map[string]any, 0, len(p.Hops))
 			for _, h := range p.Hops {
 				hops = append(hops, map[string]any{"ifacePHash": h.IfacePHash, "seq": h.Seq, "direction": h.Direction})
 			}
-			paths = append(paths, map[string]any{"hops": hops})
+			paths = append(paths, map[string]any{"pathPHash": pathPHash, "hops": hops})
 		}
-		out = append(out, map[string]any{"toPHash": dep.ToAppSvc, "to": dep.ToName, "paths": paths})
+		out = append(out, map[string]any{"toPHash": dep.ToAppSvc, "to": dep.ToName, "connPHash": connPHash, "paths": paths})
 	}
 	return out
 }

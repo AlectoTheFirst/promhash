@@ -23,15 +23,17 @@ type Kind string
 // The supported entity kinds. The string value of each is used both as the
 // id prefix and as part of the hashed input.
 const (
-	KindDevice   Kind = "device"
-	KindIface    Kind = "interface"
-	KindIP       Kind = "ip"
-	KindEndpoint Kind = "endpoint"
-	KindApp      Kind = "application"
-	KindAppSvc   Kind = "appservice"
-	KindBizSvc   Kind = "businessservice"
-	KindCustomer Kind = "customer"
-	KindSegment  Kind = "segment"
+	KindDevice     Kind = "device"
+	KindIface      Kind = "interface"
+	KindIP         Kind = "ip"
+	KindEndpoint   Kind = "endpoint"
+	KindApp        Kind = "application"
+	KindAppSvc     Kind = "appservice"
+	KindBizSvc     Kind = "businessservice"
+	KindCustomer   Kind = "customer"
+	KindSegment    Kind = "segment"
+	KindConnection Kind = "connection"
+	KindPath       Kind = "path"
 )
 
 // NormalizeToken returns the canonical form of a name token for
