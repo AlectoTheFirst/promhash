@@ -96,13 +96,46 @@ func TestNormDevice(t *testing.T) {
 	}
 }
 
-func TestNormDeviceMatchesHash(t *testing.T) {
-	// The whole point: NormDevice("Rtr1") == the normalization Hash applies,
-	// so NormDevice(x) as a map key is always equal to Hash's internal key.
-	a := Hash(KindIface, "Rtr1", "te0/1/2")
-	b := Hash(KindIface, NormDevice("Rtr1"), "te0/1/2")
+// TestNormDevicePreFoldedInputsMatchHash verifies that pre-folding a device
+// name with NormDevice before passing to Hash produces the same result as
+// passing the already-normalized (lowercased, trimmed, space-free) form
+// directly. This is the contract that sync.go and resolver.go rely on:
+// NormDevice output is already space-free and lowercased, so Hash's own
+// ToLower+TrimSpace is a no-op on it, and iface PHash stays stable.
+//
+// Note: Hash does NOT apply NormDevice internally; callers are responsible for
+// pre-folding device and ifName args for iface identity. This test documents
+// that the pre-fold round-trip is idempotent, not that Hash calls NormDevice.
+func TestNormDevicePreFoldedInputsMatchHash(t *testing.T) {
+	// NormDevice("Rtr1") == "rtr1"; Hash("rtr1",...) should equal Hash("Rtr1",...)
+	// after Hash's own ToLower+TrimSpace, so pre-folding is equivalent.
+	a := Hash(KindIface, NormDevice("Rtr1"), "te0/1/2")
+	b := Hash(KindIface, "rtr1", "te0/1/2")
 	if a != b {
-		t.Fatalf("NormDevice diverges from Hash normalization: %q vs %q", a, b)
+		t.Fatalf("pre-folded NormDevice key diverges from lowercase form: %q vs %q", a, b)
+	}
+	// But Hash("Rtr1",...) also equals Hash("rtr1",...) via ToLower — so sync.go
+	// passing pre-normalized device is identical to passing the canonical ASCII form.
+	c := Hash(KindIface, "Rtr1", "te0/1/2")
+	if c != b {
+		t.Fatalf("Hash did not lower-case device part: %q vs %q", c, b)
+	}
+}
+
+// TestHashAppInteriorSpacePreserved is a regression test for the scope
+// regression introduced in commit 5f83874: Hash must NOT collapse interior
+// spaces in app/service/customer names. "my app" and "myapp" are distinct
+// identities; "My App" and "my app" are the same (case-insensitive).
+func TestHashAppInteriorSpacePreserved(t *testing.T) {
+	withSpace := Hash(KindApp, "my app")
+	noSpace := Hash(KindApp, "myapp")
+	if withSpace == noSpace {
+		t.Fatalf("INV1 violated: Hash(KindApp,'my app') == Hash(KindApp,'myapp') = %q; interior space must be preserved", withSpace)
+	}
+
+	mixedCase := Hash(KindApp, "My App")
+	if mixedCase != withSpace {
+		t.Fatalf("INV1 violated: Hash(KindApp,'My App') %q != Hash(KindApp,'my app') %q; case must be folded", mixedCase, withSpace)
 	}
 }
 

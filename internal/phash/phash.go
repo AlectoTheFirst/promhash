@@ -34,17 +34,19 @@ const (
 	KindSegment  Kind = "segment"
 )
 
-// NormalizeToken returns the canonical form of a name token: NFKC normalization
-// (which folds full-width and other compatibility Unicode variants to their
-// ASCII equivalents), followed by Unicode-whitespace collapse (strings.Fields
-// covers NBSP U+00A0 and all other Unicode space classes), joined with no
-// separator so interior spaces vanish, and finally lowercased.
+// NormalizeToken returns the canonical form of a name token for
+// interface/device identity: NFKC normalization (which folds full-width and
+// other compatibility Unicode variants to their ASCII equivalents), followed by
+// Unicode-whitespace collapse (strings.Fields covers NBSP U+00A0 and all other
+// Unicode space classes), joined with no separator so interior spaces vanish,
+// and finally lowercased.
 //
-// This is the single shared normalizer applied at every identity site:
-// CanonicalIfName (catalog) and NormDevice / Hash (phash). Using NFKC rather
-// than NFC is deliberate: NFC only applies canonical decomposition, which does
-// not fold full-width characters (U+FF00–U+FF5E) to ASCII; NFKC applies
-// compatibility decomposition and does.
+// NormalizeToken is used by CanonicalIfName and NormDevice. Hash does NOT call
+// NormalizeToken; it uses the weaker ToLower+TrimSpace to preserve interior
+// spaces in app/service/customer names. Using NFKC rather than NFC is
+// deliberate: NFC applies only canonical decomposition and leaves full-width
+// characters (U+FF00–U+FF5E) intact; NFKC applies compatibility decomposition
+// and folds them to ASCII equivalents.
 func NormalizeToken(s string) string {
 	// NFKC folds full-width/compatibility variants to ASCII equivalents.
 	s = norm.NFKC.String(s)
@@ -54,8 +56,10 @@ func NormalizeToken(s string) string {
 	return strings.ToLower(s)
 }
 
-// NormDevice returns the canonical form of a device name as applied by Hash:
-// NFKC-normalized, interior Unicode whitespace collapsed, and lowercased.
+// NormDevice returns the canonical form of a device name: NFKC-normalized,
+// interior Unicode whitespace collapsed, and lowercased. Callers that build
+// iface/device hashes must pre-fold device inputs with NormDevice before
+// passing to Hash, since Hash itself only applies ToLower+TrimSpace.
 // Store and lookup must both call NormDevice so that the stored key, the hash
 // input, and the lookup key are always identical.
 func NormDevice(s string) string {
@@ -79,12 +83,21 @@ func SafeKey(field, value string) error {
 }
 
 // Hash returns a stable id "kind:<16 hex>" over case/space-normalized parts.
-// Normalization uses NormalizeToken (NFKC + whitespace collapse + lowercase)
-// so Hash, NormDevice, and CanonicalIfName all apply the same transform.
+// Normalization applies strings.ToLower(strings.TrimSpace(part)) to each
+// component so that leading/trailing whitespace and case differences are
+// ignored, but interior spaces and Unicode compatibility variants (e.g.
+// full-width) are preserved. This keeps app, service, and customer identities
+// stable across the full Unicode name space.
+//
+// Interface and device identity require the stronger NFKC + whitespace-collapse
+// normalizer; callers that compute iface/device hashes must pre-fold their
+// inputs with NormDevice and CanonicalIfName before passing to Hash. Hash
+// itself does not apply that aggressive transform so that names like "my app"
+// remain distinct from "myapp".
 func Hash(k Kind, parts ...string) string {
 	normalized := make([]string, len(parts))
 	for i, p := range parts {
-		normalized[i] = NormalizeToken(p)
+		normalized[i] = strings.ToLower(strings.TrimSpace(p))
 	}
 	h := sha256.Sum256([]byte(string(k) + "\x1f" + strings.Join(normalized, "\x1f")))
 	return string(k) + ":" + hex.EncodeToString(h[:])[:16]
