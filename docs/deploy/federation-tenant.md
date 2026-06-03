@@ -1,3 +1,11 @@
+# Federation tenant deployment (C6) — DEPRECATED
+
+> **Deprecated.** This model (per-app federation + per-app tenant Prometheus) has
+> been superseded by the shared-evaluator projection model. See
+> `docs/deploy/shared-evaluator.md` for the current deployment guide.
+>
+> This file is retained for historical reference only.
+
 # Federation tenant deployment (C6)
 
 promhash maps each curated application onto **one logical tenant**. A tenant is a

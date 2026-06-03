@@ -16,8 +16,8 @@ type pathHealthRule struct {
 	Expr   string `yaml:"expr"`
 }
 
-// joinKeys renders the on(...) join-key clause used by the group_left rules for
-// the given JoinKey. JoinByComposite joins on the synthesized composite iface
+// joinKeys renders the on(...) join-key clause used by the group_right() rules
+// for the given JoinKey. JoinByComposite joins on the synthesized composite iface
 // label; JoinByIfName joins on (instance, ifName).
 func joinKeys(jk JoinKey) string {
 	switch jk {
@@ -146,7 +146,9 @@ type ruleGroupDoc struct {
 // PathHealthRules returns the static, app-independent Prometheus recording-rule
 // group (group name promhash_path_health) as YAML. The rules join raw SNMP
 // counters against the bounded promhash_interface_app{…}=1 mapping series via
-// group_left, so app/service/device/ifName labels fan out onto the counters.
+// group_right(), so app/service/device/ifName labels fan out onto the counters.
+// The counter is the LEFT ("one") operand and the mapping series is the RIGHT
+// ("many") operand, because a shared physical interface can map to multiple apps.
 //
 // jk selects the join column: JoinByComposite joins on(iface); JoinByIfName
 // joins on(instance, ifName). The rule set is otherwise identical and contains

@@ -342,10 +342,10 @@ A first-class Grafana datasource (`plugin/promhash-datasource`) that surfaces th
 - `apps` — populate an application picker.
 - `path_interfaces/<app>` — the interface set for the selected application.
 
-**The zero-cardinality dashboard pattern.** For applications that are *not* projected into per-app series, a dashboard joins two datasources at query time: a plugin template variable supplies *which* interfaces an application crosses, and a normal Prometheus panel queries the raw infrastructure metrics scoped to that set:
+**The zero-cardinality dashboard pattern.** For applications that are *not* projected into per-app series, a dashboard joins two datasources at query time: a plugin template variable supplies *which* interfaces an application crosses (populated via `path_interfaces/<app>` — each entry is the composite `iface` label `instance:ifIndex`), and a normal Prometheus panel queries the raw infrastructure metrics scoped to that set using the composite label:
 
 ```promql
-rate(ifHCOutOctets{instance=~"$instance", ifIndex=~"$ifIndex"}[5m])
+rate(ifHCOutOctets{iface=~"$iface"}[5m])
 ```
 
 The application-to-interface mapping becomes a Grafana variable, never a label. Curated applications skip the plugin entirely and query their `app:…` series directly with `sum by(app)`.
@@ -356,15 +356,59 @@ For Grafana Enterprise the plugin is built and privately signed (or allow-listed
 
 ## Enrichment and federation
 
-For curated applications, `promhash-enrich` writes two artifacts per application:
+promhash uses a **shared-evaluator projection model** that replaces the old per-app federation/tenant architecture. A single rule-evaluating Prometheus (not agent mode — agent mode cannot evaluate recording rules) scrapes the raw SNMP counters, evaluates the path-health recording rules once for all apps, and remote-writes the results with a `tenant` external label. No per-application scrape or federation hop is needed.
 
-- **`federate.match`** — a Prometheus `match[]` selector listing exactly that application's interfaces, e.g.
-  `{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"10.0.0.1|10.0.0.2", ifIndex=~"42|43"}`
-- **`rules.yaml`** — a recording-rule group, one rule per hop (no summation across candidate paths, which would double-count), direction-aware, stamping `app`, `service`, `device`, `ifName`, and `coverage`.
+### Three serving tiers
 
-A per-application tenant Prometheus federates only its slice from the main Prometheus, evaluates the recording rules, and remote-writes the resulting `app`-labeled series to long-term storage. The generator also emits a tenant scrape-config via `internal/enrich`'s `TenantScrapeConfig`. The existing GitOps pipeline applies everything under `gitops/enrichment/<app>/`.
+**T0 — free graph lookups (Grafana variables).** The graph answers path and impact queries for every application at zero Prometheus cost. The `path_interfaces/<app>` variable query returns the composite `iface` label (`instance:ifIndex`) for each hop — this is how the zero-cardinality dashboard pattern works.
 
-The working set per tenant is the size of one application's path — tens to hundreds of series — so the recording rules are cheap to evaluate. A core link shared by several curated applications is recorded once per tenant; that duplication is bounded by the (small, intentional) curated set.
+**T1 — bounded mapping series + path-health recording rules (the primary layer).** `promhash-enrich` emits three shared artifacts under `_shared/`:
+
+- **`mapping.prom`** — Prometheus exposition text for `promhash_interface_app{app,service,device,ifName,instance,ifIndex,iface,direction}=1`. One line per (interface, app, direction) pair; bounded by the curated set.
+- **`path-health.rules.yaml`** — a static, app-independent recording-rule group (`promhash_path_health`) that joins the raw counter firehose against the mapping series using `group_right()`. The counter series is the LEFT ("one") operand; the mapping series is the RIGHT ("many") operand because a shared physical interface maps to multiple apps. A single physical interface fans out to one result series per mapped app. The five base rules:
+
+```promql
+# Egress octet rate per hop, with app/service labels fanned on:
+app:if_egress_octets:rate5m  = rate(ifHCOutOctets[5m]) * on(iface) group_right() promhash_interface_app{direction="egress"}
+
+# Ingress octet rate per hop:
+app:if_ingress_octets:rate5m = rate(ifHCInOctets[5m]) * on(iface) group_right() promhash_interface_app{direction="ingress"}
+
+# Interface capacity in bits/s (collapses ingress/egress direction with max without(direction)):
+app:if_capacity_bps          = (ifHighSpeed > 0) * 1e6 * on(iface) group_right() max without(direction)(promhash_interface_app)
+
+# Operational up-state as 0/1 (direction-agnostic):
+app:if_oper_up:state         = (ifOperStatus == bool 1) * on(iface) group_right() max without(direction)(promhash_interface_app)
+
+# Link utilization ratio (ignoring(direction) because capacity has no direction label):
+app:if_util:ratio            = app:if_egress_octets:rate5m * 8 / ignoring(direction) app:if_capacity_bps
+```
+
+Plus per-path rollup rules:
+
+```promql
+app:path_util_max:ratio      = max by(app, service)(app:if_util:ratio)
+app:path_oper_up_min:state   = min by(app, service)(app:if_oper_up:state)
+app:path_hops_down:count     = count by(app, service)(app:if_oper_up:state == 0)
+```
+
+- **`evaluator.yaml`** — the rule-evaluating Prometheus config (`SharedEvaluatorConfig`): scrapes the raw counters as a single static target, synthesizes the composite `iface` label from `[instance, ifIndex]` via `metric_relabel_configs` (JoinByComposite mode), loads `path-health.rules.yaml`, and remote-writes once with `global.external_labels.tenant`.
+
+**T2 — optional per-app rollup series.** The same evaluator can serve additional per-app aggregation rules built from the T1 series; these are opt-in for applications with SLO or alerting requirements.
+
+### Join-key choice
+
+The default join key is **`composite`** (`on(iface)`), where `iface` is a synthesized label (`instance:ifIndex`) that is always available regardless of SNMP exporter configuration.
+
+The alternative is **`ifname`** (`on(instance, ifName)`). This join key requires the `snmp_exporter` to expose `ifName` as a label on the `ifHC*Octets` series. If your exporter configuration does not include `ifName` on counter metrics, use the `composite` join key.
+
+### As-of-emit LTS attribution caveat
+
+Once app-labeled samples are remote-written to long-term storage they are immutable. The graph is point-in-time and retractable — an interface can be removed from an app's declared path, and the graph reflects the change immediately. Long-term storage does not. Attribution in LTS is **as-of-emit and non-retractable**: if an interface was mapped to an application at the time the samples were written, those historical samples carry that attribution forever, even if the mapping is later corrected in the graph. Keep this in mind when interpreting historical path-health data.
+
+### Deployment
+
+See `docs/deploy/shared-evaluator.md` for the full deployment guide.
 
 ---
 
@@ -377,7 +421,7 @@ curl -s "localhost:8080/interface-apps?device=rtr-core-1&ifName=tengige0/1/2" | 
 
 **Build an app-path-health dashboard (no per-app series).** Add the promhash datasource; create a variable from `path_interfaces/$app`; in a Prometheus panel, filter the raw interface metrics by that variable.
 
-**Enrich an application into first-class metrics.** Add the application name to the `promhash-enrich -apps` list, run it, and let GitOps deploy the generated `gitops/enrichment/<app>/` artifacts to its tenant. Then query `app:if_egress_octets:rate5m{app="<app>"}`.
+**Enrich an application into first-class metrics.** Add the application name to the `promhash-enrich -apps` list, run it, and let GitOps deploy the generated `_shared/` artifacts to the shared evaluator. Then query `app:if_egress_octets:rate5m{app="<app>"}`.
 
 **Ask who was affected at a past time.** Pass a Unix timestamp:
 ```bash
@@ -398,7 +442,7 @@ A Go workspace: command entry points under `cmd/`, the libraries under `internal
 | `internal/graph` | The Neo4j access layer: schema constraints, node/edge upserts, and the path/impact traversals. | `Repo`, `New`, `EnsureConstraints`, `UpsertInterface`, `AppPath`, `InterfaceImpact`, `ListApps`, `UpsertDeclaredApp`, `CloseAppValidity` |
 | `internal/catalog` | The interface catalog and resolver: vendor name canonicalization, matching a human interface reference to exactly one real interface, and syncing harvested interfaces into the graph. | `CanonicalIfName`, `Resolver`, `NewResolver`, `(*Resolver).Resolve`, `Sync` |
 | `internal/declare` | The declared-path YAML format, parsing, validation against the catalog, and loading into the graph. | `App`, `Parse`, `Validate`, `Load`, `(Dependency).Candidates` |
-| `internal/enrich` | Artifact generation: federation selectors, recording-rule groups, and tenant scrape-configs. | `FederationMatch`, `RuleGroup`, `TenantScrapeConfig` |
+| `internal/enrich` | Shared-evaluator artifact generation: mapping series, path-health recording rules, and the shared evaluator config. | `MappingSeries`, `RenderMappingSeries`, `PathHealthRules`, `SharedEvaluatorConfig` |
 | `internal/promclient` | Prometheus query client used to harvest the live interface inventory. | `Client`, `New`, `HarvestInterfaces` |
 | `internal/nautobot` | Nautobot client; maps device names to management IPs (the Prometheus `instance`). | `Client`, `New`, `DeviceInstanceMap` |
 | `internal/servicenow` | ServiceNow client; reads applications and services for seeding. | `Client`, `New`, `Applications` |

@@ -7,8 +7,9 @@ import (
 )
 
 // EvaluatorOpts holds the parameters for generating a shared-evaluator
-// Prometheus-agent config. It replaces the old per-app federation/tenant model
-// with a single scrape + single remote_write architecture.
+// rule-evaluating Prometheus config. It replaces the old per-app
+// federation/tenant model with a single scrape + single remote_write
+// architecture.
 type EvaluatorOpts struct {
 	// ScrapeTarget is the host:port (or scheme://host:port) of the raw-counters
 	// endpoint to scrape.
@@ -56,7 +57,7 @@ type evaluatorRemoteWriteDoc struct {
 }
 
 // evaluatorConfigDoc is the full top-level structure of the rendered
-// Prometheus-agent config.
+// rule-evaluating Prometheus config.
 type evaluatorConfigDoc struct {
 	Global       evaluatorGlobalDoc        `yaml:"global"`
 	RuleFiles    []string                  `yaml:"rule_files"`
@@ -64,7 +65,7 @@ type evaluatorConfigDoc struct {
 	RemoteWrite  []evaluatorRemoteWriteDoc  `yaml:"remote_write"`
 }
 
-// SharedEvaluatorConfig renders ONE Prometheus-agent config that:
+// SharedEvaluatorConfig renders ONE rule-evaluating Prometheus config that:
 //   - stamps opts.TenantLabel as global.external_labels.tenant
 //   - scrapes opts.ScrapeTarget as a single static_configs target (job_name
 //     "promhash-evaluator"; never a per-app promhash-fed-* job; no honor_labels)
@@ -74,8 +75,8 @@ type evaluatorConfigDoc struct {
 //   - loads path-health.rules.yaml via rule_files
 //   - remote_writes to opts.RemoteWriteURL
 //
-// The returned string is valid Prometheus YAML. It replaces the old per-app
-// federation/tenant scrape model.
+// The returned string is valid rule-evaluating Prometheus YAML. It replaces the
+// old per-app federation/tenant scrape model.
 func SharedEvaluatorConfig(opts EvaluatorOpts) string {
 	scrape := evaluatorScrapeConfigDoc{
 		JobName: "promhash-evaluator",
