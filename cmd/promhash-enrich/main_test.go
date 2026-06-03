@@ -286,7 +286,42 @@ func TestPruneLegacyArtifacts(t *testing.T) {
 	}
 }
 
-// Test 7: parseJoinKey rejects unknown values.
+// Test 7: pruneLegacyArtifacts skips app names that would traverse outside outDir.
+func TestPruneLegacyArtifacts_RejectsTraversalAppName(t *testing.T) {
+	// outDir is the directory pruneLegacyArtifacts is told to operate on.
+	outDir := t.TempDir()
+	// siblingDir simulates a directory OUTSIDE outDir that would be reached by
+	// an unguarded filepath.Join(outDir, "../evil").
+	siblingDir := t.TempDir()
+
+	// Plant a legacy file in the sibling dir that the unguarded code would remove.
+	sentinel := filepath.Join(siblingDir, "federate.match")
+	if err := os.WriteFile(sentinel, []byte("should not be removed"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	// Construct the traversal app name so that filepath.Join(outDir, app) points
+	// at siblingDir. We need a relative path from outDir to siblingDir.
+	rel, err := filepath.Rel(outDir, siblingDir)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+
+	apps := map[string][]graph.Hop{
+		rel: {sharedHop},
+	}
+
+	if err := pruneLegacyArtifacts(outDir, apps); err != nil {
+		t.Fatalf("pruneLegacyArtifacts: %v", err)
+	}
+
+	// The sentinel file outside outDir must still exist.
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("sentinel file outside outDir was removed or made inaccessible: %v", err)
+	}
+}
+
+// Test 9: parseJoinKey rejects unknown values.
 func TestParseJoinKey_UnknownValueReturnsError(t *testing.T) {
 	_, err := parseJoinKey("bogus")
 	if err == nil {
@@ -297,7 +332,7 @@ func TestParseJoinKey_UnknownValueReturnsError(t *testing.T) {
 	}
 }
 
-// Test 8: parseJoinKey maps known values correctly.
+// Test 10: parseJoinKey maps known values correctly.
 func TestParseJoinKey_KnownValues(t *testing.T) {
 	cases := []struct {
 		in   string

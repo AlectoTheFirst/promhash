@@ -165,9 +165,22 @@ func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[
 // (federate.match, rules.yaml, scrape.yaml) from each app's subdirectory
 // under dir. If removing all three leaves the app directory empty, the
 // directory itself is removed. The _shared/ subdirectory is never touched.
+//
+// scrape.yaml is included for defensive coverage: this binary never writes it,
+// but earlier tooling (TenantScrapeConfig) may have left it behind in app dirs.
 func pruneLegacyArtifacts(dir string, apps map[string][]graph.Hop) error {
 	legacyFiles := []string{"federate.match", "rules.yaml", "scrape.yaml"}
 	for app := range apps {
+		// Guard against path-traversal: only touch direct children of dir.
+		// An app name containing a separator or that differs from its own
+		// Base (e.g. "../evil") would resolve outside dir — skip it.
+		if app == "" || app == "." || app == ".." ||
+			strings.ContainsRune(app, '/') ||
+			strings.ContainsRune(app, os.PathSeparator) ||
+			filepath.Base(app) != app {
+			log.Printf("prune-legacy: skipping unsafe app name %q", app)
+			continue
+		}
 		appDir := filepath.Join(dir, app)
 		for _, f := range legacyFiles {
 			p := filepath.Join(appDir, f)
