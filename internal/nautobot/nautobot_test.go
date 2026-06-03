@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeviceInstanceMap(t *testing.T) {
@@ -122,6 +123,10 @@ func TestDeviceInstanceMapHostMismatch(t *testing.T) {
 }
 
 func TestDeviceInstanceMapNon2xx(t *testing.T) {
+	orig := retryBase
+	retryBase = 1 * time.Millisecond
+	t.Cleanup(func() { retryBase = orig })
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"detail":"nope"}`))

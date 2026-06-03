@@ -34,6 +34,10 @@ var snPageSize = 1000
 // Applications to prevent an infinite loop against a misbehaving server.
 var snMaxPages = 1000
 
+// retryBase is the starting backoff duration for DoWithRetry. It is a
+// package-level var so that tests can override it to speed up retry scenarios.
+var retryBase = 500 * time.Millisecond
+
 // Client is a ServiceNow Table API client that authenticates with HTTP basic
 // auth and reuses a single underlying http.Client for all requests.
 type Client struct {
@@ -103,7 +107,7 @@ func (c *Client) Applications(ctx context.Context) ([]Application, error) {
 			return req, nil
 		}
 
-		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, 500*time.Millisecond)
+		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, retryBase)
 		if err != nil {
 			return nil, err
 		}

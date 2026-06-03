@@ -3,6 +3,7 @@ package httpx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -30,20 +31,7 @@ func isRetriableStatus(code int) bool {
 
 // isCtxError reports whether err is a context cancellation or deadline error.
 func isCtxError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// context.Canceled and context.DeadlineExceeded satisfy Unwrap chains; use
-	// errors.Is via the standard library's check via the interface route.
-	if err == context.Canceled || err == context.DeadlineExceeded {
-		return true
-	}
-	// Unwrap to handle wrapped context errors (e.g. from url.Error).
-	type unwrapper interface{ Unwrap() error }
-	if u, ok := err.(unwrapper); ok {
-		return isCtxError(u.Unwrap())
-	}
-	return false
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // retryAfterDelay parses the Retry-After header from resp and returns the delay
@@ -123,7 +111,7 @@ func DoWithRetry(ctx context.Context, hc *http.Client, newReq func() (*http.Requ
 			if attempt == attempts-1 {
 				return nil, err
 			}
-			if sleepErr := backoffSleep(ctx, attempt, base, nil); sleepErr != nil {
+			if sleepErr := backoffSleep(ctx, attempt, base, 0); sleepErr != nil {
 				return nil, sleepErr
 			}
 			continue
@@ -140,30 +128,34 @@ func DoWithRetry(ctx context.Context, hc *http.Client, newReq func() (*http.Requ
 			return resp, nil
 		}
 
+		// Parse Retry-After before draining/closing the body so the data flow
+		// is unambiguous (retryAfterDelay only reads headers, but we want it
+		// called while the response is still logically "open").
+		retryAfter, hasRetryAfter := retryAfterDelay(resp)
+
 		// Drain and close the body so the connection can be reused.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) //nolint:errcheck
 		resp.Body.Close()
 
-		if sleepErr := backoffSleep(ctx, attempt, base, resp); sleepErr != nil {
+		var serverDelay time.Duration
+		if hasRetryAfter {
+			serverDelay = retryAfter
+		}
+		if sleepErr := backoffSleep(ctx, attempt, base, serverDelay); sleepErr != nil {
 			return nil, sleepErr
 		}
 	}
 
-	// Unreachable, but satisfies the compiler.
-	return nil, nil
+	panic("httpx: unreachable")
 }
 
 // backoffSleep sleeps for the appropriate backoff duration before the next
-// attempt. If resp is non-nil and carries a Retry-After header, that delay is
-// used; otherwise exponential backoff with jitter is applied.
+// attempt. serverDelay is the parsed Retry-After value (0 means absent); when
+// non-zero it is used instead of the computed exponential backoff. Otherwise
+// exponential backoff with jitter is applied.
 // Returns a non-nil error if ctx is cancelled during the sleep.
-func backoffSleep(ctx context.Context, attempt int, base time.Duration, resp *http.Response) error {
-	var delay time.Duration
-	if resp != nil {
-		if d, ok := retryAfterDelay(resp); ok {
-			delay = d
-		}
-	}
+func backoffSleep(ctx context.Context, attempt int, base time.Duration, serverDelay time.Duration) error {
+	delay := serverDelay
 	if delay == 0 {
 		// Exponential backoff: base * 2^attempt.
 		exp := base
@@ -179,8 +171,10 @@ func backoffSleep(ctx context.Context, attempt int, base time.Duration, resp *ht
 		return ctx.Err() // handle the Retry-After: 0 case — check ctx but don't sleep
 	}
 
+	t := time.NewTimer(delay)
+	defer t.Stop()
 	select {
-	case <-time.After(delay):
+	case <-t.C:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

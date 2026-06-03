@@ -33,6 +33,10 @@ var nbPageSize = 1000
 // DeviceInstanceMap to prevent an infinite loop against a misbehaving server.
 var nbMaxPages = 1000
 
+// retryBase is the starting backoff duration for DoWithRetry. It is a
+// package-level var so that tests can override it to speed up retry scenarios.
+var retryBase = 500 * time.Millisecond
+
 // Client talks to a Nautobot REST API using a base URL and an optional
 // API token for authentication.
 type Client struct {
@@ -94,7 +98,7 @@ func (c *Client) DeviceInstanceMap(ctx context.Context) (map[string]string, erro
 			return req, nil
 		}
 
-		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, 500*time.Millisecond)
+		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, retryBase)
 		if err != nil {
 			return nil, err
 		}

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makeApps builds a slice of appResp.Result entries for test handlers.
@@ -169,6 +170,10 @@ func TestApplicationsPageCapExceeded(t *testing.T) {
 }
 
 func TestApplicationsNon2xx(t *testing.T) {
+	orig := retryBase
+	retryBase = 1 * time.Millisecond
+	t.Cleanup(func() { retryBase = orig })
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":{"message":"boom"}}`))
