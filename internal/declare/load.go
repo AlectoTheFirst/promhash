@@ -35,7 +35,7 @@ func Load(ctx context.Context, r *graph.Repo, a App, res *catalog.Resolver, sour
 		da.Deps = append(da.Deps, gd)
 	}
 	// Supersede any currently-open edges so re-declaration replaces rather than
-	// duplicates (Connection/Path are CREATEd), atomically in one transaction so
+	// duplicates (Connection/Path are MERGEd, idempotent upsert), atomically in one transaction so
 	// a partial failure cannot leave the app with all edges closed and no new
 	// revision. First load is a no-op (close finds nothing to stamp).
 	return r.ReloadDeclaredApp(ctx, da, validFrom)

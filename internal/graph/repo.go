@@ -48,7 +48,7 @@ func (r *Repo) execWrite(ctx context.Context, fn func(tx neo4j.ManagedTransactio
 // idempotent and safe to call on every startup.
 func (r *Repo) EnsureConstraints(ctx context.Context) error {
 	for _, label := range []string{LabelInterface, LabelDevice, "Application", "ApplicationService",
-		"BusinessService", "Customer", "Endpoint", "IP", "Segment"} {
+		"BusinessService", "Customer", "Endpoint", "IP", "Segment", "Connection", "Path"} {
 		cy := fmt.Sprintf(
 			"CREATE CONSTRAINT phash_%s IF NOT EXISTS FOR (n:%s) REQUIRE n.phash IS UNIQUE", label, label)
 		if err := r.write(ctx, cy, nil); err != nil {

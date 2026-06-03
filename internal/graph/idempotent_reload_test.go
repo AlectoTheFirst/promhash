@@ -93,6 +93,34 @@ func TestReloadIdempotentUnderRetry(t *testing.T) {
 			pathCount1, pathCount2)
 	}
 
+	// Relationship counts must also be unchanged (defense-in-depth: MERGE must not
+	// fan out or create duplicate USES, TAKES, or HOP relationships on replay).
+	usesCount1 := countRel(t, ctx, drv, dbName, "USES")
+	takesCount1 := countRel(t, ctx, drv, dbName, "TAKES")
+	hopCount1 := countRel(t, ctx, drv, dbName, "HOP")
+
+	// Third upsert: another identical replay to measure rel-count stability.
+	if err := r.UpsertDeclaredApp(ctx, d); err != nil {
+		t.Fatalf("third UpsertDeclaredApp (rel-count retry simulation): %v", err)
+	}
+
+	usesCount2 := countRel(t, ctx, drv, dbName, "USES")
+	takesCount2 := countRel(t, ctx, drv, dbName, "TAKES")
+	hopCount2 := countRel(t, ctx, drv, dbName, "HOP")
+
+	if usesCount2 != usesCount1 {
+		t.Errorf("USES relationships duplicated on retry: first=%d second=%d (want equal)",
+			usesCount1, usesCount2)
+	}
+	if takesCount2 != takesCount1 {
+		t.Errorf("TAKES relationships duplicated on retry: first=%d second=%d (want equal)",
+			takesCount1, takesCount2)
+	}
+	if hopCount2 != hopCount1 {
+		t.Errorf("HOP relationships duplicated on retry: first=%d second=%d (want equal)",
+			hopCount1, hopCount2)
+	}
+
 	// Sanity: AppPath must still return the correct hops after the replay.
 	hops, err := r.AppPath(ctx, "application:idem-test", time.Now())
 	if err != nil {
@@ -111,6 +139,20 @@ func countLabel(t *testing.T, ctx context.Context, drv neo4j.DriverWithContext, 
 		nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(db))
 	if err != nil {
 		t.Fatalf("countLabel(%s): %v", label, err)
+	}
+	v, _ := res.Records[0].Get("n")
+	n, _ := v.(int64)
+	return n
+}
+
+// countRel returns the total number of relationships with the given type.
+func countRel(t *testing.T, ctx context.Context, drv neo4j.DriverWithContext, db, relType string) int64 {
+	t.Helper()
+	res, err := neo4j.ExecuteQuery(ctx, drv,
+		"MATCH ()-[r:"+relType+"]->() RETURN count(r) AS n",
+		nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(db))
+	if err != nil {
+		t.Fatalf("countRel(%s): %v", relType, err)
 	}
 	v, _ := res.Records[0].Get("n")
 	n, _ := v.(int64)
