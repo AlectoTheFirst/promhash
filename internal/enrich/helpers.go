@@ -41,6 +41,28 @@ func Selectors(hops []graph.Hop) (instances []string, ifIndexes []string) {
 	return instances, ifIndexes
 }
 
+// IfaceSelectors returns the deduplicated, deterministically-sorted set of
+// composite "instance:ifIndex" strings for the REAL (instance, ifIndex) pairs
+// present in hops. Unlike Selectors, which returns separate flat lists that a
+// naive caller could cross-product, IfaceSelectors returns only the pairs that
+// actually exist — so a dashboard variable built from this slice has exactly
+// the right members with no cross-product inflation.
+//
+// The slice is non-nil even when hops is empty, so it marshals to a JSON array
+// rather than null.
+func IfaceSelectors(hops []graph.Hop) []string {
+	seen := map[string]struct{}{}
+	for _, h := range hops {
+		seen[h.Instance+":"+strconv.Itoa(h.IfIndex)] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // labelValueEscape escapes a string for use as a Prometheus exposition-format
 // label value. It applies the three substitutions required by the text format
 // specification:
