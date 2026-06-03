@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/AlectoTheFirst/promhash/internal/httpx"
 )
 
 // maxBodyBytes caps the response body read from Nautobot to guard against
@@ -80,15 +82,19 @@ func (c *Client) DeviceInstanceMap(ctx context.Context) (map[string]string, erro
 
 	out := map[string]string{}
 	for page := 0; page < nbMaxPages; page++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		if c.token != "" {
-			req.Header.Set("Authorization", "Token "+c.token)
+		pageURL := nextURL // capture for the closure
+		factory := func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			if c.token != "" {
+				req.Header.Set("Authorization", "Token "+c.token)
+			}
+			return req, nil
 		}
 
-		resp, err := c.hc.Do(req)
+		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, 500*time.Millisecond)
 		if err != nil {
 			return nil, err
 		}

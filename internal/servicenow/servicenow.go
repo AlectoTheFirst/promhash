@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AlectoTheFirst/promhash/internal/httpx"
 )
 
 // maxBodyBytes caps the response body read from ServiceNow to guard against
@@ -91,13 +93,17 @@ func (c *Client) Applications(ctx context.Context) ([]Application, error) {
 		pageURL := *baseURL
 		pageURL.RawQuery = q.Encode()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL.String(), nil)
-		if err != nil {
-			return nil, err
+		pageURLStr := pageURL.String() // capture for the closure
+		factory := func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURLStr, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.SetBasicAuth(c.user, c.pass)
+			return req, nil
 		}
-		req.SetBasicAuth(c.user, c.pass)
 
-		resp, err := c.hc.Do(req)
+		resp, err := httpx.DoWithRetry(ctx, c.hc, factory, 3, 500*time.Millisecond)
 		if err != nil {
 			return nil, err
 		}

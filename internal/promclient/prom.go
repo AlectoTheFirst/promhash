@@ -4,6 +4,7 @@ package promclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -48,15 +49,54 @@ func NewWithTimeout(addr string, timeout time.Duration) (*Client, error) {
 
 const harvestQuery = `group by (instance, ifIndex, ifName, ifDescr, ifAlias) (ifHCInOctets)`
 
+// queryAttempts is the number of total tries for the Prometheus Query call.
+// It is a package-level var so tests can reduce it without subclassing.
+var queryAttempts = 3
+
+// queryBase is the initial backoff duration for retries on the Prometheus Query call.
+var queryBase = 500 * time.Millisecond
+
+// isCtxError reports whether err (or any wrapped cause) is a context error.
+func isCtxError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // HarvestInterfaces queries Prometheus for the set of known interfaces and
 // returns one IfaceRow per series. skipped counts series whose ifIndex label
 // was present but non-numeric (those rows are not appended). An absent ifIndex
 // label is allowed and yields IfIndex=0. An empty vector (zero series) is not
 // an error. A non-vector result type (matrix, scalar, string) is an error.
+//
+// The underlying Query call is retried on transient errors (not on context
+// cancellation or deadline).
 func (c *Client) HarvestInterfaces(ctx context.Context) (rows []IfaceRow, skipped int, err error) {
-	val, _, err := c.api.Query(ctx, harvestQuery, time.Time{})
-	if err != nil {
-		return nil, 0, err
+	var val model.Value
+	for attempt := 0; attempt < queryAttempts; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, 0, ctxErr
+		}
+		var queryErr error
+		val, _, queryErr = c.api.Query(ctx, harvestQuery, time.Time{})
+		if queryErr == nil {
+			break
+		}
+		if isCtxError(queryErr) {
+			return nil, 0, queryErr
+		}
+		// Transient error: retry if attempts remain, otherwise return it.
+		if attempt == queryAttempts-1 {
+			return nil, 0, queryErr
+		}
+		// Interruptible backoff: base * 2^attempt.
+		delay := queryBase
+		for i := 0; i < attempt; i++ {
+			delay *= 2
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
 	}
 	vec, ok := val.(model.Vector)
 	if !ok {
