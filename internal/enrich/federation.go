@@ -8,8 +8,6 @@ package enrich
 import (
 	"fmt"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/AlectoTheFirst/promhash/internal/graph"
@@ -21,23 +19,14 @@ import (
 // into regex alternations so the selector is deterministic regardless of hop
 // order.
 func FederationMatch(hops []graph.Hop) string {
-	insts, idxs := map[string]struct{}{}, map[string]struct{}{}
-	for _, h := range hops {
-		// instance values may contain regex metacharacters (e.g. ':' in host:port
-		// is benign, but '.' '[' etc. are not), so escape them before joining into
-		// the instance=~ alternation. ifIndex is an integer and needs no escaping.
-		insts[regexp.QuoteMeta(h.Instance)] = struct{}{}
-		idxs[strconv.Itoa(h.IfIndex)] = struct{}{}
+	insts, idxs := Selectors(hops)
+	// instance values may contain regex metacharacters (e.g. ':' in host:port
+	// is benign, but '.' '[' etc. are not), so escape them before joining into
+	// the instance=~ alternation. ifIndex is an integer and needs no escaping.
+	escaped := make([]string, len(insts))
+	for i, inst := range insts {
+		escaped[i] = regexp.QuoteMeta(inst)
 	}
 	return fmt.Sprintf(`{__name__=~"ifHC(In|Out)Octets|ifOperStatus", instance=~"%s", ifIndex=~"%s"}`,
-		strings.Join(sortedKeys(insts), "|"), strings.Join(sortedKeys(idxs), "|"))
-}
-
-func sortedKeys(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+		strings.Join(escaped, "|"), strings.Join(idxs, "|"))
 }
