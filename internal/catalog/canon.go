@@ -6,7 +6,8 @@ package catalog
 
 import (
 	"regexp"
-	"strings"
+
+	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
 
 // abbrev maps short vendor forms to their canonical long form. Matching is an
@@ -23,11 +24,18 @@ var abbrev = []struct{ short, long string }{
 
 var prefixRe = regexp.MustCompile(`^([a-z]+)(.*)$`)
 
-// CanonicalIfName lowercases, trims, and expands vendor abbreviations on the
-// leading alpha token. Juniper-style names (with '-') are left as-is after norm.
+// CanonicalIfName normalizes and expands vendor abbreviations on the leading
+// alpha token of an interface name. Normalization applies phash.NormalizeToken
+// (NFKC + Unicode-whitespace collapse + lowercase) so that full-width variants,
+// NBSP-separated tokens, and mixed-case inputs all produce the same canonical
+// output. Juniper-style names (with '-') are returned after normalization
+// without abbreviation expansion.
 func CanonicalIfName(vendor, raw string) string {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	if strings.Contains(s, "-") {
+	s := phash.NormalizeToken(raw)
+	if s == "" {
+		return s
+	}
+	if containsDash(s) {
 		return s
 	} // juniper ge-0/0/3, xe-0/1/2
 	m := prefixRe.FindStringSubmatch(s)
@@ -43,4 +51,16 @@ func CanonicalIfName(vendor, raw string) string {
 		}
 	}
 	return best + tail
+}
+
+// containsDash reports whether s contains a '-' character. Extracted to avoid
+// importing "strings" solely for one Contains call now that the strings import
+// was replaced by the phash import.
+func containsDash(s string) bool {
+	for _, c := range s {
+		if c == '-' {
+			return true
+		}
+	}
+	return false
 }
