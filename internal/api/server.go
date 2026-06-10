@@ -14,7 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/AlectoTheFirst/promhash/internal/catalog"
+	"github.com/AlectoTheFirst/promhash/internal/enrich"
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 	"github.com/AlectoTheFirst/promhash/internal/phash"
 )
@@ -35,6 +38,8 @@ type Repo interface {
 	// ListAllInterfaces returns every known interface, used by lookupImpact to
 	// build a catalog.Resolver that maps raw query params to canonical phashes.
 	ListAllInterfaces(ctx context.Context) ([]graph.Iface, error)
+	// Ping verifies the backing store is reachable; used by /readyz.
+	Ping(ctx context.Context) error
 }
 
 // Server routes the HTTP API endpoints to handlers backed by a Repo.
@@ -49,8 +54,12 @@ func NewServer(r Repo) *Server {
 	s := &Server{repo: r, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /apps", s.listApps)
 	s.mux.HandleFunc("GET /apps/{app}/path", s.appPath)
+	s.mux.HandleFunc("GET /apps/{app}/ifaces", s.appIfaces)
 	s.mux.HandleFunc("GET /interface-apps", s.ifaceApps)
 	s.mux.HandleFunc("GET /impact", s.impact)
+	s.mux.HandleFunc("GET /healthz", s.healthz)
+	s.mux.HandleFunc("GET /readyz", s.readyz)
+	s.mux.Handle("GET /metrics", promhttp.Handler())
 	return s
 }
 
@@ -115,6 +124,46 @@ func (s *Server) appPath(w http.ResponseWriter, r *http.Request) {
 		hops = []graph.Hop{} // explicit empty, never null
 	}
 	writeJSON(w, hops)
+}
+
+// appIfaces returns the deduplicated composite "instance:ifIndex" selectors
+// for the application's path hops. This is the data source for the
+// zero-cardinality dashboard pattern: a Grafana template variable built from
+// this list scopes raw interface metrics with iface=~"$iface" — the
+// app-to-interface mapping never becomes a Prometheus label.
+func (s *Server) appIfaces(w http.ResponseWriter, r *http.Request) {
+	t, ok := at(r)
+	if !ok {
+		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+		return
+	}
+	hops, err := s.repo.AppPath(r.Context(), phash.Hash(phash.KindApp, r.PathValue("app")), t)
+	if err != nil {
+		log.Printf("api: AppPath (ifaces): %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// IfaceSelectors returns a non-nil, sorted, deduplicated slice.
+	writeJSON(w, enrich.IfaceSelectors(hops))
+}
+
+// healthz is the liveness probe: the process is up and serving.
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// readyz is the readiness probe: 200 only when the graph store answers.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.repo.Ping(ctx); err != nil {
+		log.Printf("api: readyz: %v", err)
+		http.Error(w, "graph store unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 // lookupImpact resolves (device, ifName) to a canonical catalog interface and

@@ -2,7 +2,7 @@
 
 **Map classic network and infrastructure metrics to the business applications that depend on them — without ever exploding Prometheus cardinality.**
 
-promhash bridges three worlds that rarely share a reliable key: the asset/application records in a CMDB (ServiceNow), network telemetry, and the millions of infrastructure time series in Prometheus (`snmp_exporter`, `blackbox_exporter`, `node_exporter`, and friends). It holds the application-to-infrastructure relationship in a property graph, and uses that graph to answer two questions cheaply:
+promhash bridges three worlds that rarely share a reliable key: the application knowledge engineering teams hold (declared as YAML in git — a CMDB integration such as ServiceNow is a planned later feature), network telemetry, and the millions of infrastructure time series in Prometheus (`snmp_exporter`, `blackbox_exporter`, `node_exporter`, and friends). It holds the application-to-infrastructure relationship in a property graph, and uses that graph to answer two questions cheaply:
 
 - **App path health** — *given an application, which devices and interfaces does its traffic cross, and are any of them saturated or down?*
 - **Impact / blast radius** — *this interface or device just failed; which applications and customers are affected?*
@@ -46,14 +46,13 @@ promhash keeps the many-to-many relationship in a graph, where it belongs, and s
 ## How it works
 
 ```
-  Nautobot (topology / IPAM) ─┐  device <-> instance map, optional seed
-  ServiceNow (app -> CI -> IP) ┼───────────────────────────┐  seed (typed nodes)
-  Prometheus interface labels ─┘  catalog sync (real ifName/ifDescr/ifAlias/ifIndex)
+  Prometheus interface labels ─┐  catalog sync (real ifName/ifDescr/ifAlias/ifIndex)
+  Nautobot (topology / IPAM) ──┘  device <-> instance map (optional)
                               │                             ▼
   declared paths (YAML in git) ── loader (CI-validated) ──► ┌─────────────────────┐
-                                                            │  Neo4j graph        │
+            PRIMARY SOURCE                                  │  Neo4j graph        │
                                                             │  business + paths,  │
-                                                            │  provenance + time  │
+  ServiceNow seed (planned, later feature) ─ ─ ─ ─ ─ ─ ─ ─► │  provenance + time  │
                                                             └─────────┬───────────┘
                           ┌──────────────────────────────────────────┼──────────────────────┐
                           ▼ curated apps                              ▼ every app            │
@@ -119,9 +118,9 @@ Notes that shape the whole system:
 |-----------|-----------|-------|
 | Go 1.26+ | Building everything | Single static binaries |
 | Neo4j 5 | The graph store | Memgraph also works (both speak Cypher) |
-| Prometheus | Interface catalog + federation | Any version exposing `ifHC*Octets` with `ifName`/`ifDescr`/`ifAlias`/`ifIndex` labels |
-| Nautobot | Optional | Device → management-IP (`instance`) mapping, seed |
-| ServiceNow | Optional | Seed applications and services |
+| Prometheus | Interface catalog + shared evaluator | Any version exposing `ifHC*Octets` with `ifName`/`ifDescr`/`ifAlias`/`ifIndex` labels |
+| Nautobot | Optional | Device → management-IP (`instance`) mapping |
+| ServiceNow | Planned (later feature) | CMDB seeding of applications and services; not needed for v1 — declarations in git are the source |
 | Grafana 10.4+ | The datasource plugin | Enterprise supported |
 | Docker or Podman | Integration tests only | The test suite spins up throwaway Neo4j containers |
 
@@ -139,41 +138,42 @@ make build          # or: go build ./...
 docker run -d --name neo4j -p7687:7687 -p7474:7474 \
   -e NEO4J_AUTH=neo4j/changeme neo4j:5.23
 
-# secrets come from the environment (NEO4J_PASS / SERVICENOW_PASS / NAUTOBOT_TOKEN); never pass them as flags
+# secrets come from the environment (NEO4J_PASS / NAUTOBOT_TOKEN); never pass them as flags
 export NEO=bolt://localhost:7687
 export NEO4J_PASS=changeme
-export SERVICENOW_PASS=<your-password>
 export NAUTOBOT_TOKEN=<your-token>
 
-# 3. (Optional) seed application/service nodes from ServiceNow
-./promhash-seed -neo4j $NEO \
-  -servicenow https://example.service-now.com \
-  -servicenow-user "$SN_USER"
-
-# 4. Sync the interface catalog from Prometheus (and Nautobot for device names)
+# 3. Sync the interface catalog from Prometheus (and Nautobot for device names)
 ./promhash-catalog -neo4j $NEO \
   -prometheus http://prometheus:9090 \
   -nautobot https://nautobot.example.com \
   -vendor cisco
 
-# 5. Write a declaration (see "Declaring application paths") into ./declared/payments.yaml,
+# 4. Write a declaration (see "Declaring application paths") into ./declared/payments.yaml,
 #    then validate it (this is what CI runs on a pull request)
 ./promhash-loader -dir ./declared -neo4j $NEO -validate-only
 
-# 6. Load it into the graph
+# 5. Load it into the graph
 ./promhash-loader -dir ./declared -neo4j $NEO -source "$(git rev-parse HEAD)"
 
-# 7. Generate federation + recording-rule artifacts for curated apps
-./promhash-enrich -neo4j $NEO -apps payments -out ./gitops/enrichment
+# 6. Generate the shared-evaluator artifacts for curated apps
+./promhash-enrich -neo4j $NEO -apps payments -out ./gitops/enrichment \
+  -main-prom snmp-exporter:9116 \
+  -mapping-target mapping-server:8080 \
+  -remote-write-url http://mimir:9090/api/v1/push \
+  -tenant-label prod
 
-# 8. Serve the graph
+# 7. Serve the graph
 ./promhash-api -neo4j $NEO -addr :8080 &
 
-# 9. Ask the questions
+# 8. Ask the questions
 curl -s localhost:8080/apps
 curl -s localhost:8080/apps/payments/path | jq
+curl -s localhost:8080/apps/payments/ifaces | jq
 curl -s "localhost:8080/impact?device=rtr-core-1&ifName=tengige0/1/2" | jq
 ```
+
+(Seeding application stubs from ServiceNow — `promhash-seed` — is a planned later feature; v1 creates all application/service nodes from the YAML declarations themselves.)
 
 ---
 
@@ -186,6 +186,7 @@ Application paths are declared as YAML in a git repository. The git history *is*
 app: payments                 # -> (:Application)
 runs_as: payments-api         # -> (:ApplicationService), RUNS_AS
 owner: team-payments
+criticality: tier-1           # free-form; surfaced in impact results
 
 consumed_by_customers:        # -> (:Customer)-CONSUMES->(:BusinessService)-REALIZED_BY->payments-api
   - acme
@@ -218,6 +219,7 @@ Field reference:
 | `app` | Business application name. |
 | `runs_as` | The application service that actually carries traffic. |
 | `owner` | Owning team; surfaced in impact results. |
+| `criticality` | Free-form business criticality (e.g. `tier-1`); surfaced in impact results. Optional. |
 | `consumed_by_customers` | Customers/tenants that consume the application; gives the customer dimension in impact. |
 | `depends_on[].to` | A downstream application service this one talks to (east-west dependency). |
 | `depends_on[].paths[].hops[]` | An ordered list of hops for one candidate path. |
@@ -247,9 +249,9 @@ Harvests the real interface inventory from Prometheus and binds it to device nam
 
 Nautobot authentication token: set `NAUTOBOT_TOKEN` in the environment.
 
-### `promhash-seed` — import typed nodes from ServiceNow
+### `promhash-seed` — import typed nodes from ServiceNow *(later feature)*
 
-One-shot import of application and application-service nodes so declarations resolve against real entities.
+One-shot import of application and application-service node stubs from a ServiceNow CMDB. **This is a preview of a planned integration and is not part of the v1 workflow** — declarations in git create all application/service nodes themselves, and a seeded stub is only ever enriched, never required.
 
 ```
 -servicenow       ServiceNow base URL
@@ -270,11 +272,18 @@ Reads every `*.yaml` in a directory, resolves interface references, and loads th
 
 ### `promhash-enrich` — generate GitOps artifacts for curated apps
 
-For each named application, traverses the graph, resolves current `ifIndex`/`instance`, and writes a federation `match[]` selector and a recording-rule group under `-out/<app>/`.
+For each named application, traverses the graph, resolves current `ifIndex`/`instance`, and writes the three shared-evaluator artifacts under `-out/_shared/`: `mapping.prom`, `path-health.rules.yaml`, and `evaluator.yaml` (see [Enrichment and federation](#enrichment-and-federation)).
 
 ```
--apps  comma-separated list of curated application names
--out   output directory for artifacts  (default gitops/enrichment)
+-apps              comma-separated list of curated application names
+-out               output directory for artifacts  (default gitops/enrichment)
+-main-prom         scrape target host:port for the raw counters (required)
+-mapping-target    host:port serving the rendered mapping.prom (required)
+-mapping-path      HTTP path of the mapping exposition  (default /mapping.prom)
+-remote-write-url  URL of the remote_write receiver (required)
+-tenant-label      value stamped as global.external_labels.tenant (required)
+-join-key          composite (default) or ifname
+-prune-legacy      remove stale per-app artifacts from earlier versions
 ```
 
 ### `promhash-api` — serve the graph over HTTP
@@ -293,8 +302,11 @@ A small read-only surface over the graph, backed by Cypher. It is the single ser
 |----------|---------|
 | `GET /apps` | List of application names. |
 | `GET /apps/{app}/path` | The application's path as an ordered list of hops. |
+| `GET /apps/{app}/ifaces` | Deduplicated composite `instance:ifIndex` selectors for the app's hops — the value list behind the zero-cardinality dashboard variable. |
 | `GET /interface-apps?device=&ifName=` | Applications, services and customers that traverse an interface. |
 | `GET /impact?device=&ifName=&at=<unix>` | Blast radius for an interface, optionally at a point in time. |
+| `GET /healthz`, `GET /readyz` | Liveness; readiness (200 only when the graph store answers). |
+| `GET /metrics` | Prometheus self-metrics for the API process. |
 
 `{app}` is a business application name. `device` and `ifName` are passed as query parameters using the canonical interface name (the form stored in the catalog) — query parameters are used because canonical names contain `/`. The optional `at` parameter is a Unix timestamp for point-in-time queries; it defaults to now.
 
@@ -337,10 +349,10 @@ A first-class Grafana datasource (`plugin/promhash-datasource`) that surfaces th
 - `app_path` — an application's ordered hops, for path-health panels.
 - `impact` / `interface_apps` — the applications affected by an interface.
 
-**Variable queries** (via the plugin's resource endpoint):
+**Variable queries** (type the query string into a Grafana variable of type *Query* backed by this datasource):
 
-- `apps` — populate an application picker.
-- `path_interfaces/<app>` — the interface set for the selected application.
+- `apps` — populate an application picker (e.g. a variable named `app`).
+- `path_interfaces/$app` — the composite `instance:ifIndex` selector set for the selected application (backed by `GET /apps/{app}/ifaces`).
 
 **The zero-cardinality dashboard pattern.** For applications that are *not* projected into per-app series, a dashboard joins two datasources at query time: a plugin template variable supplies *which* interfaces an application crosses (populated via `path_interfaces/<app>` — each entry is the composite `iface` label `instance:ifIndex`), and a normal Prometheus panel queries the raw infrastructure metrics scoped to that set using the composite label:
 
@@ -392,7 +404,7 @@ app:path_oper_up_min:state   = min by(app, service)(app:if_oper_up:state)
 app:path_hops_down:count     = count by(app, service)(app:if_oper_up:state == 0)
 ```
 
-- **`evaluator.yaml`** — the rule-evaluating Prometheus config (`SharedEvaluatorConfig`): scrapes the raw counters as a single static target, synthesizes the composite `iface` label from `[instance, ifIndex]` via `metric_relabel_configs` (JoinByComposite mode), loads `path-health.rules.yaml`, and remote-writes once with `global.external_labels.tenant`.
+- **`evaluator.yaml`** — the rule-evaluating Prometheus config (`SharedEvaluatorConfig`): scrapes the raw counters as a single static target (synthesizing the composite `iface` label from `[instance, ifIndex]` via `metric_relabel_configs` in JoinByComposite mode), scrapes the served `mapping.prom` as a second job with `honor_labels: true` (so the mapping's `instance`/`ifIndex`/`iface` identity labels survive — without this job the path-health rules join against a metric the evaluator never ingests and evaluate to nothing), loads `path-health.rules.yaml`, and remote-writes once with `global.external_labels.tenant`.
 
 **T2 — optional per-app rollup series.** The same evaluator can serve additional per-app aggregation rules built from the T1 series; these are opt-in for applications with SLO or alerting requirements.
 
@@ -442,7 +454,7 @@ A Go workspace: command entry points under `cmd/`, the libraries under `internal
 | `internal/graph` | The Neo4j access layer: schema constraints, node/edge upserts, and the path/impact traversals. | `Repo`, `New`, `EnsureConstraints`, `UpsertInterface`, `AppPath`, `InterfaceImpact`, `ListApps`, `UpsertDeclaredApp`, `CloseAppValidity` |
 | `internal/catalog` | The interface catalog and resolver: vendor name canonicalization, matching a human interface reference to exactly one real interface, and syncing harvested interfaces into the graph. | `CanonicalIfName`, `Resolver`, `NewResolver`, `(*Resolver).Resolve`, `Sync` |
 | `internal/declare` | The declared-path YAML format, parsing, validation against the catalog, and loading into the graph. | `App`, `Parse`, `Validate`, `Load`, `(Dependency).Candidates` |
-| `internal/enrich` | Shared-evaluator artifact generation: mapping series, path-health recording rules, and the shared evaluator config. | `MappingSeries`, `RenderMappingSeries`, `PathHealthRules`, `SharedEvaluatorConfig` |
+| `internal/enrich` | Shared-evaluator artifact generation: mapping series, path-health recording rules, the shared evaluator config, and the composite dashboard-variable selectors. | `MappingSeries`, `RenderMappingSeries`, `PathHealthRules`, `SharedEvaluatorConfig`, `IfaceSelectors` |
 | `internal/promclient` | Prometheus query client used to harvest the live interface inventory. | `Client`, `New`, `HarvestInterfaces` |
 | `internal/nautobot` | Nautobot client; maps device names to management IPs (the Prometheus `instance`). | `Client`, `New`, `DeviceInstanceMap` |
 | `internal/servicenow` | ServiceNow client; reads applications and services for seeding. | `Client`, `New`, `Applications` |
@@ -499,11 +511,13 @@ The data model in the graph is the full design; v1 deliberately implements a sub
 - **Device identity is a property, not a node.** An interface stores its device name as the `device` property (sufficient for the impact and path queries); a first-class `(:Device)` node with `(:Interface)-[:ON]->(:Device)` is deferred.
 - **`HOP` validity is inherited from its parent `TAKES` edge.** Point-in-time queries filter on `TAKES` validity; `HOP` carries only `seq` and `direction`. Superseded `Path` nodes are retained immutably as history and are reachable only through a closed `TAKES`.
 - **The HTTP API ships no built-in authentication or TLS.** It binds to localhost by default and returns generic errors. Expose it by fronting it with an authenticating reverse proxy or mTLS; treat the API host as a trust boundary.
+- **`/apps/{app}/path` flattens candidate paths.** The graph stores each ECMP/alternate candidate as its own `Path`, but the API response merges all candidates (and all dependencies) into one hop list ordered by `seq`. Candidate identity in the API (a `pathId` per hop) lands together with flow ingestion, which is what makes "which candidate is active" answerable.
 
 ## Roadmap
 
 The data model is built to absorb these without a rewrite:
 
+- **ServiceNow CMDB integration.** Seed and reconcile application/service records from the CMDB (`promhash-seed` ships as a preview of this). Declarations in git remain the source of truth for paths; the CMDB contributes business metadata and entity stubs.
 - **Quantitative attribution (Layer 2).** Ingest flow records (NetFlow/IPFIX from the core, firewall byte counts at boundaries) to split interface traffic across applications by share, and to fill in which candidate path was actually active and with what weight — written back as a `flow`-provenance overlay.
 - **Automated path discovery.** Derive path edges from observed flow and from modeled topology/routing, alongside the declared edges, each with its own provenance.
 - **Chargeback and per-customer views** once quantitative attribution exists.

@@ -18,14 +18,14 @@ remote-writes the resulting app-labeled series once with a `tenant` external lab
 No per-application scrape, federation hop, or separate tenant Prometheus is needed.
 
 ```
-  snmp_exporter (raw counters)
-        │
-        ▼
+  snmp_exporter (raw counters)      mapping server (serves mapping.prom)
+        │                                 │
+        ▼                                 ▼ honor_labels: true
   shared evaluator Prometheus        ← evaluator.yaml (SharedEvaluatorConfig)
-    scrapes raw counters
-    relabels: iface = instance:ifIndex (composite mode)
+    scrapes raw counters + mapping
+    relabels: iface = instance:ifIndex (composite mode, counters job only)
     loads: path-health.rules.yaml      ← PathHealthRules(JoinByComposite)
-    joins: counters × mapping.prom     ← RenderMappingSeries
+    joins: counters × mapping series   ← RenderMappingSeries
     emits: app:if_egress_octets:rate5m, app:if_oper_up:state, …
         │
         ▼ remote_write (tenant external label)
@@ -145,6 +145,12 @@ scrape_configs:
         regex: "(.+)"
         replacement: "${1}"
 
+  - job_name: promhash-mapping
+    honor_labels: true               # REQUIRED — see below
+    metrics_path: /mapping.prom      # -mapping-path (default /mapping.prom)
+    static_configs:
+      - targets: [<mapping-server-host:port>]   # -mapping-target
+
 remote_write:
   - url: <remote-write-url>
 ```
@@ -152,6 +158,16 @@ remote_write:
 The `metric_relabel_configs` block synthesizes the composite `iface` label from
 `instance` and `ifIndex` on every scraped counter sample. This is the join key
 used by the `group_right()` recording rules.
+
+The `promhash-mapping` job ingests the `promhash_interface_app` series — the
+rules join against this metric, so **without this job every path-health rule
+evaluates to empty**. `honor_labels: true` is mandatory: the mapping exposition
+carries the *devices'* `instance`/`ifIndex`/`iface` identity labels, and without
+it Prometheus would rewrite `instance` to the mapping server's address (moving
+the original to `exported_instance`), breaking the `on(instance, ifName)` join
+key and mislabeling every `group_right()` result. The mapping job carries no
+`iface` relabel — the exposition text already contains an explicit `iface`
+label.
 
 ---
 
@@ -182,14 +198,18 @@ path-health data across declaration changes.
 
 ## Deploying the shared evaluator
 
-1. Run `promhash-enrich` to generate the `_shared/` artifacts.
-2. Deploy `_shared/mapping.prom` as a file-based scrape target accessible to the
-   evaluator (or serve it from the `promhash-api` metrics endpoint).
+1. Run `promhash-enrich` with `-main-prom`, `-mapping-target`,
+   `-remote-write-url` and `-tenant-label` to generate the `_shared/` artifacts.
+2. Serve `_shared/mapping.prom` over HTTP at the address given as
+   `-mapping-target` (any static file server works — nginx, `python -m
+   http.server`, a GitOps sidecar). The generated `evaluator.yaml` already
+   contains the `promhash-mapping` scrape job pointing at it.
 3. Copy `_shared/path-health.rules.yaml` and `_shared/evaluator.yaml` to the
    evaluator's config directory.
 4. Start (or reload) the evaluator Prometheus with `evaluator.yaml` as its
    `--config.file`.
-5. Confirm that `app:if_egress_octets:rate5m` series appear in the evaluator
+5. Confirm that `promhash_interface_app` series appear in the evaluator (the
+   mapping job is up), then that `app:if_egress_octets:rate5m` series appear
    and are flowing to long-term storage.
 
 Regenerate and redeploy all `_shared/` artifacts whenever the curated app set

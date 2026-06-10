@@ -14,6 +14,16 @@ type EvaluatorOpts struct {
 	// ScrapeTarget is the host:port (or scheme://host:port) of the raw-counters
 	// endpoint to scrape.
 	ScrapeTarget string
+	// MappingTarget is the host:port serving the rendered mapping.prom
+	// exposition text (see RenderMappingSeries). The path-health rules join the
+	// raw counters against promhash_interface_app, so the evaluator MUST ingest
+	// the mapping series or every rule evaluates to empty. When MappingTarget
+	// is empty no mapping scrape job is emitted (the caller is expected to
+	// reject that configuration).
+	MappingTarget string
+	// MappingMetricsPath is the HTTP path of the mapping exposition on
+	// MappingTarget. Empty means the default "/mapping.prom".
+	MappingMetricsPath string
 	// RemoteWriteURL is the URL of the remote_write receiver.
 	RemoteWriteURL string
 	// TenantLabel is stamped as global.external_labels.tenant to identify the
@@ -24,6 +34,10 @@ type EvaluatorOpts struct {
 	// JoinByIfName: no iface synthesis (rules join on instance,ifName directly).
 	JoinKey JoinKey
 }
+
+// DefaultMappingMetricsPath is the metrics_path used for the mapping scrape
+// job when EvaluatorOpts.MappingMetricsPath is empty.
+const DefaultMappingMetricsPath = "/mapping.prom"
 
 // evaluatorGlobalDoc is the top-level global: block of the Prometheus config.
 type evaluatorGlobalDoc struct {
@@ -47,6 +61,8 @@ type evaluatorStaticConfigDoc struct {
 // evaluatorScrapeConfigDoc is one entry in a scrape_configs list.
 type evaluatorScrapeConfigDoc struct {
 	JobName              string                     `yaml:"job_name"`
+	HonorLabels          bool                       `yaml:"honor_labels,omitempty"`
+	MetricsPath          string                     `yaml:"metrics_path,omitempty"`
 	StaticConfigs        []evaluatorStaticConfigDoc `yaml:"static_configs"`
 	MetricRelabelConfigs []evaluatorRelabelDoc      `yaml:"metric_relabel_configs,omitempty"`
 }
@@ -69,9 +85,15 @@ type evaluatorConfigDoc struct {
 //   - stamps opts.TenantLabel as global.external_labels.tenant
 //   - scrapes opts.ScrapeTarget as a single static_configs target (job_name
 //     "promhash-evaluator"; never a per-app promhash-fed-* job; no honor_labels)
+//   - scrapes the mapping exposition (promhash_interface_app) from
+//     opts.MappingTarget (job_name "promhash-mapping") with honor_labels: true,
+//     so the mapping's identity labels (instance, ifIndex, iface) survive the
+//     scrape instead of being rewritten to the mapping server's address — the
+//     path-health joins depend on them
 //   - in JoinByComposite mode: synthesizes the iface label from [instance,
 //     ifIndex] via metric_relabel_configs (separator ":", regex "(.+)",
-//     replacement "${1}")
+//     replacement "${1}") on the counters job only (the mapping exposition
+//     already carries an explicit iface label)
 //   - loads path-health.rules.yaml via rule_files
 //   - remote_writes to opts.RemoteWriteURL
 //
@@ -97,6 +119,22 @@ func SharedEvaluatorConfig(opts EvaluatorOpts) string {
 		}
 	}
 
+	scrapes := []evaluatorScrapeConfigDoc{scrape}
+	if opts.MappingTarget != "" {
+		path := opts.MappingMetricsPath
+		if path == "" {
+			path = DefaultMappingMetricsPath
+		}
+		scrapes = append(scrapes, evaluatorScrapeConfigDoc{
+			JobName:     "promhash-mapping",
+			HonorLabels: true,
+			MetricsPath: path,
+			StaticConfigs: []evaluatorStaticConfigDoc{
+				{Targets: []string{opts.MappingTarget}},
+			},
+		})
+	}
+
 	doc := evaluatorConfigDoc{
 		Global: evaluatorGlobalDoc{
 			ExternalLabels: map[string]string{
@@ -104,7 +142,7 @@ func SharedEvaluatorConfig(opts EvaluatorOpts) string {
 			},
 		},
 		RuleFiles:    []string{"path-health.rules.yaml"},
-		ScrapeConfig: []evaluatorScrapeConfigDoc{scrape},
+		ScrapeConfig: scrapes,
 		RemoteWrite:  []evaluatorRemoteWriteDoc{{URL: opts.RemoteWriteURL}},
 	}
 

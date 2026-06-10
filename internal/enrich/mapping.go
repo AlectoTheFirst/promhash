@@ -9,11 +9,13 @@ import (
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
-// JoinKey selects which label the downstream recording-rule group_left will
-// use to join the mapping series against raw counters. Both IfName and Iface
-// are always populated in every MappingPoint regardless of the JoinKey, so
-// this parameter is currently inert within RA1; it is threaded so that RA2
-// and RA4 can read it from a shared config without requiring a new type.
+// JoinKey selects which label the path-health recording rules use to join the
+// mapping series against the raw counters: the synthesized composite iface
+// label (on(iface)) or the exporter-provided name pair (on(instance, ifName)).
+// It also controls whether SharedEvaluatorConfig emits the iface-synthesizing
+// metric_relabel block. Both IfName and Iface are always populated in every
+// MappingPoint regardless of the JoinKey, so MappingSeries output is
+// join-key-independent.
 type JoinKey int
 
 const (
@@ -64,10 +66,10 @@ type dedupKey struct {
 // The returned slice is deterministically sorted by (direction, instance,
 // ifIndex, app, service) and is non-nil even when empty.
 //
-// jk is threaded for downstream use by RA2/RA4; it does not alter point
-// contents in RA1 since both IfName and Iface are always populated.
+// jk does not alter point contents (both IfName and Iface are always
+// populated); it is accepted so callers thread one shared config value.
 func MappingSeries(app, service string, hops []graph.Hop, jk JoinKey) []MappingPoint {
-	_ = jk // inert in RA1; see JoinKey doc
+	_ = jk // see JoinKey doc
 
 	seen := map[dedupKey]struct{}{}
 	pts := make([]MappingPoint, 0, len(hops))

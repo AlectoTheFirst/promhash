@@ -39,6 +39,7 @@ func TestUpsertDeclaredAppNoCustomers(t *testing.T) {
 		AppSvcPHash: "appservice:payments",
 		AppSvc:      "payments",
 		Owner:       "team-payments",
+		Criticality: "tier-1",
 		Customers:   nil, // no consumers — the case that used to drop all deps
 		Source:      "declare-test",
 		ValidFrom:   validFrom,
@@ -71,5 +72,17 @@ func TestUpsertDeclaredAppNoCustomers(t *testing.T) {
 	}
 	if h.Confidence != declaredConfidence {
 		t.Fatalf("want confidence %v, got %v", declaredConfidence, h.Confidence)
+	}
+
+	// Declared owner/criticality must round-trip into impact rows.
+	rows, err := r.InterfaceImpact(ctx, "interface:hop1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 impact row, got %d (%+v)", len(rows), rows)
+	}
+	if rows[0].Owner != "team-payments" || rows[0].Criticality != "tier-1" {
+		t.Fatalf("owner/criticality did not round-trip: %+v", rows[0])
 	}
 }

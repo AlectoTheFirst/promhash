@@ -28,6 +28,8 @@ func run() error {
 		neoURL, neoUser, neoPass string
 		outDir, allowlist        string
 		mainProm                 string
+		mappingTarget            string
+		mappingPath              string
 		remoteWriteURL           string
 		tenantLabel              string
 		joinKeyStr               string
@@ -39,6 +41,8 @@ func run() error {
 	flag.StringVar(&outDir, "out", "gitops/enrichment", "output dir for artifacts")
 	flag.StringVar(&allowlist, "apps", "", "comma-separated curated app names")
 	flag.StringVar(&mainProm, "main-prom", "", "scrape target host:port for the shared evaluator (ScrapeTarget)")
+	flag.StringVar(&mappingTarget, "mapping-target", "", "host:port serving the rendered mapping.prom for the evaluator's mapping scrape job")
+	flag.StringVar(&mappingPath, "mapping-path", "", "HTTP path of the mapping exposition on -mapping-target (default /mapping.prom)")
 	flag.StringVar(&remoteWriteURL, "remote-write-url", "", "URL of the remote_write receiver")
 	flag.StringVar(&tenantLabel, "tenant-label", "", "value stamped as global.external_labels.tenant")
 	flag.StringVar(&joinKeyStr, "join-key", "composite", "join key for path-health rules: composite (default) or ifname")
@@ -47,6 +51,10 @@ func run() error {
 
 	if neoPass == "" {
 		neoPass = os.Getenv("NEO4J_PASS")
+	}
+
+	if err := validateRequiredFlags(mainProm, mappingTarget, remoteWriteURL, tenantLabel); err != nil {
+		return err
 	}
 
 	jk, err := parseJoinKey(joinKeyStr)
@@ -88,10 +96,12 @@ func run() error {
 	}
 
 	opts := enrich.EvaluatorOpts{
-		ScrapeTarget:   mainProm,
-		RemoteWriteURL: remoteWriteURL,
-		TenantLabel:    tenantLabel,
-		JoinKey:        jk,
+		ScrapeTarget:       mainProm,
+		MappingTarget:      mappingTarget,
+		MappingMetricsPath: mappingPath,
+		RemoteWriteURL:     remoteWriteURL,
+		TenantLabel:        tenantLabel,
+		JoinKey:            jk,
 	}
 
 	if err := writeSharedArtifacts(outDir, apps, svcNames, opts); err != nil {
@@ -104,6 +114,28 @@ func run() error {
 		}
 	}
 
+	return nil
+}
+
+// validateRequiredFlags rejects an invocation missing any flag without which
+// the generated evaluator.yaml would be silently broken: no counter scrape, no
+// mapping ingestion (rules join against nothing), no remote_write destination,
+// or no tenant identity.
+func validateRequiredFlags(mainProm, mappingTarget, remoteWriteURL, tenantLabel string) error {
+	var missing []string
+	for _, f := range []struct{ name, val string }{
+		{"-main-prom", mainProm},
+		{"-mapping-target", mappingTarget},
+		{"-remote-write-url", remoteWriteURL},
+		{"-tenant-label", tenantLabel},
+	} {
+		if strings.TrimSpace(f.val) == "" {
+			missing = append(missing, f.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required flag(s): %s", strings.Join(missing, ", "))
+	}
 	return nil
 }
 

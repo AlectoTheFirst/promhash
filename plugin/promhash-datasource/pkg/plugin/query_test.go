@@ -55,7 +55,8 @@ func TestQueryImpactDefault(t *testing.T) {
 	var gotPath, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
-		w.Write([]byte(`[{"app":"payments","service":"checkout","customer":"acme"}]`))
+		// The real API wraps the rows; the plugin must unwrap "impact".
+		w.Write([]byte(`{"interface":"rtr-core-1/tengige0/1/2","impact":[{"app":"payments","service":"checkout","customer":"acme","owner":"team-pay","criticality":"tier-1"}]}`))
 	}))
 	defer srv.Close()
 	ds := &Datasource{apiURL: srv.URL, hc: srv.Client()}
@@ -98,5 +99,35 @@ func TestQueryImpactDefault(t *testing.T) {
 	}
 	if got := svcField.At(0).(string); got != "checkout" {
 		t.Fatalf("service[0] = %q, want checkout", got)
+	}
+	critField, idx := f.FieldByName("criticality")
+	if idx < 0 {
+		t.Fatalf("no criticality field in frame")
+	}
+	if got := critField.At(0).(string); got != "tier-1" {
+		t.Fatalf("criticality[0] = %q, want tier-1", got)
+	}
+}
+
+// TestQueryImpactNoPathKnown asserts the wrapped empty-impact response (with
+// its "note" field) decodes to an empty frame rather than erroring.
+func TestQueryImpactNoPathKnown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"interface":"rtr-x/eth0","impact":[],"note":"no path known"}`))
+	}))
+	defer srv.Close()
+	ds := &Datasource{apiURL: srv.URL, hc: srv.Client()}
+	raw, _ := json.Marshal(map[string]string{"queryType": "impact", "device": "rtr-x", "ifName": "eth0"})
+	resp, err := ds.QueryData(context.Background(), &backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: raw}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr := resp.Responses["A"]
+	if dr.Error != nil {
+		t.Fatal(dr.Error)
+	}
+	if len(dr.Frames) != 1 || dr.Frames[0].Rows() != 0 {
+		t.Fatalf("want one empty frame, got %+v", dr.Frames)
 	}
 }

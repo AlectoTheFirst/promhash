@@ -11,52 +11,6 @@ import (
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 )
 
-// TestSelectors_NumericSort verifies that ifIndexes are sorted numerically
-// (not lexically) and that both instances and ifIndexes are deduplicated.
-func TestSelectors_NumericSort(t *testing.T) {
-	hops := []graph.Hop{
-		{Instance: "10.0.0.1", IfIndex: 42},
-		{Instance: "10.0.0.2", IfIndex: 9},
-		{Instance: "10.0.0.1", IfIndex: 100},
-		{Instance: "10.0.0.2", IfIndex: 42}, // duplicate ifIndex
-	}
-	insts, idxs := Selectors(hops)
-
-	// ifIndexes must be numerically ordered and deduplicated
-	wantIdxs := []string{"9", "42", "100"}
-	if len(idxs) != len(wantIdxs) {
-		t.Fatalf("ifIndexes: got %v, want %v", idxs, wantIdxs)
-	}
-	for i := range wantIdxs {
-		if idxs[i] != wantIdxs[i] {
-			t.Errorf("ifIndexes[%d]: got %q, want %q (full: %v)", i, idxs[i], wantIdxs[i], idxs)
-		}
-	}
-
-	// instances must be deduplicated (2 unique from 4 hops)
-	if len(insts) != 2 {
-		t.Errorf("instances: got %v (len %d), want 2 unique", insts, len(insts))
-	}
-}
-
-// TestSelectors_EmptyHops verifies that empty input returns non-nil slices
-// (important for JSON marshalling: [] not null).
-func TestSelectors_EmptyHops(t *testing.T) {
-	insts, idxs := Selectors(nil)
-	if insts == nil {
-		t.Error("instances: got nil, want non-nil empty slice")
-	}
-	if idxs == nil {
-		t.Error("ifIndexes: got nil, want non-nil empty slice")
-	}
-	if len(insts) != 0 {
-		t.Errorf("instances: got %v, want empty", insts)
-	}
-	if len(idxs) != 0 {
-		t.Errorf("ifIndexes: got %v, want empty", idxs)
-	}
-}
-
 // TestIfaceSelectors verifies that IfaceSelectors returns exactly the real
 // (instance, ifIndex) pairs present in the hops, with no cross-product.
 func TestIfaceSelectors(t *testing.T) {

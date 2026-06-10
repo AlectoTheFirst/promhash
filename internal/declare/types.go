@@ -38,11 +38,14 @@ type Dependency struct {
 }
 
 // App is a parsed declaration: the application, the service it runs as, its
-// owner, the customers that consume it, and the services it depends on.
+// owner and criticality, the customers that consume it, and the services it
+// depends on. Criticality is free-form business metadata (e.g. "tier-1")
+// surfaced in impact results.
 type App struct {
 	App                 string       `yaml:"app"`
 	RunsAs              string       `yaml:"runs_as"`
 	Owner               string       `yaml:"owner"`
+	Criticality         string       `yaml:"criticality"`
 	ConsumedByCustomers []string     `yaml:"consumed_by_customers"`
 	DependsOn           []Dependency `yaml:"depends_on"`
 }

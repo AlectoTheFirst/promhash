@@ -63,21 +63,31 @@ func (d *Datasource) runQuery(ctx context.Context, q query) (*data.Frame, error)
 			data.NewField("device", nil, dev), data.NewField("ifName", nil, iface),
 			data.NewField("ifIndex", nil, idx), data.NewField("direction", nil, dir)), nil
 	default: // impact / interface_apps
-		var rows []map[string]string
+		// The API wraps the rows: {"interface": "...", "impact": [...], "note"?: "..."}.
+		var resp struct {
+			Impact []map[string]string `json:"impact"`
+		}
 		qs := url.Values{"device": {q.Device}, "ifName": {q.IfName}}
-		if err := d.getJSON(ctx, "/interface-apps?"+qs.Encode(), &rows); err != nil {
+		if err := d.getJSON(ctx, "/interface-apps?"+qs.Encode(), &resp); err != nil {
 			return nil, err
 		}
+		rows := resp.Impact
 		app := make([]string, len(rows))
 		svc := make([]string, len(rows))
 		cust := make([]string, len(rows))
+		owner := make([]string, len(rows))
+		crit := make([]string, len(rows))
 		for i, r := range rows {
 			app[i] = r["app"]
 			svc[i] = r["service"]
 			cust[i] = r["customer"]
+			owner[i] = r["owner"]
+			crit[i] = r["criticality"]
 		}
 		return data.NewFrame("impact",
-			data.NewField("app", nil, app), data.NewField("service", nil, svc), data.NewField("customer", nil, cust)), nil
+			data.NewField("app", nil, app), data.NewField("service", nil, svc),
+			data.NewField("customer", nil, cust), data.NewField("owner", nil, owner),
+			data.NewField("criticality", nil, crit)), nil
 	}
 }
 

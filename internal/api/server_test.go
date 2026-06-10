@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +46,7 @@ func (fakeRepo) ListApps(_ context.Context) ([]string, error) { return []string{
 func (fakeRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
 	return testIfaces(), nil
 }
+func (fakeRepo) Ping(_ context.Context) error { return nil }
 
 // emptyRepo returns a nil slice from InterfaceImpact to exercise the nil→[] guard.
 type emptyRepo struct{ fakeRepo }
@@ -87,6 +90,100 @@ func TestAppPathHandler(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	if len(out) != 1 || out[0]["ifIndex"].(float64) != 42 {
 		t.Fatalf("body %s", rec.Body)
+	}
+}
+
+// multiHopRepo returns duplicate and transit hops to exercise the composite
+// selector dedup in /apps/{app}/ifaces.
+type multiHopRepo struct{ fakeRepo }
+
+func (multiHopRepo) AppPath(_ context.Context, _ string, _ time.Time) ([]graph.Hop, error) {
+	return []graph.Hop{
+		{Device: "rtr-core-1", Instance: "10.0.0.1", IfIndex: 42, Seq: 1, Direction: "egress"},
+		{Device: "rtr-core-2", Instance: "10.0.0.2", IfIndex: 7, Seq: 2, Direction: "transit"},
+		{Device: "rtr-core-1", Instance: "10.0.0.1", IfIndex: 42, Seq: 3, Direction: "ingress"}, // dup pair
+	}, nil
+}
+
+// TestAppIfacesHandler asserts /apps/{app}/ifaces returns the deduplicated,
+// sorted composite instance:ifIndex selectors for the app's hops.
+func TestAppIfacesHandler(t *testing.T) {
+	srv := NewServer(multiHopRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/apps/payments/ifaces", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	var out []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body)
+	}
+	want := []string{"10.0.0.1:42", "10.0.0.2:7"}
+	if len(out) != len(want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	for i := range want {
+		if out[i] != want[i] {
+			t.Fatalf("got %v, want %v", out, want)
+		}
+	}
+}
+
+// TestAppIfacesEmptyIsArray asserts an app with no hops yields [] (never null),
+// so a Grafana variable query degrades to an empty option list.
+func TestAppIfacesEmptyIsArray(t *testing.T) {
+	srv := NewServer(emptyPathRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/apps/unknown/ifaces", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Fatalf("body = %q, want []", got)
+	}
+}
+
+// emptyPathRepo returns no hops.
+type emptyPathRepo struct{ fakeRepo }
+
+func (emptyPathRepo) AppPath(_ context.Context, _ string, _ time.Time) ([]graph.Hop, error) {
+	return nil, nil
+}
+
+// TestHealthEndpoints asserts /healthz is always 200 and /readyz reflects the
+// repo's Ping result.
+func TestHealthEndpoints(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	for _, path := range []string{"/healthz", "/readyz"} {
+		rec := httptest.NewRecorder()
+		srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: code %d, want 200", path, rec.Code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	NewServer(downRepo{}).Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz with down store: code %d, want 503", rec.Code)
+	}
+}
+
+// downRepo simulates an unreachable graph store.
+type downRepo struct{ fakeRepo }
+
+func (downRepo) Ping(_ context.Context) error { return errors.New("connection refused") }
+
+// TestMetricsEndpoint asserts /metrics serves Prometheus exposition text.
+func TestMetricsEndpoint(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "go_goroutines") {
+		t.Fatalf("expected go runtime metrics in /metrics output")
 	}
 }
 

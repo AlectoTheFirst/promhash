@@ -67,6 +67,14 @@ func run() error {
 		return err
 	}
 	r := graph.New(drv, "neo4j")
+	// The loader creates Application/ApplicationService/... nodes, so the
+	// uniqueness constraints must exist before any write. Skipped in
+	// validate-only mode, which must not write anything (including schema).
+	if !validateOnly {
+		if err := r.EnsureConstraints(ctx); err != nil {
+			return fmt.Errorf("ensure constraints: %w", err)
+		}
+	}
 	cat, err := r.ListAllInterfaces(ctx)
 	if err != nil {
 		return err

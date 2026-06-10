@@ -17,7 +17,8 @@ func appSvcPHash(svc string) string { return phash.Hash(phash.KindAppSvc, svc) }
 func Load(ctx context.Context, r *graph.Repo, a App, res *catalog.Resolver, source string, validFrom time.Time) error {
 	da := graph.DeclaredApp{
 		AppPHash: appPHash(a.App), App: a.App, AppSvcPHash: appSvcPHash(a.RunsAs), AppSvc: a.RunsAs,
-		Owner: a.Owner, Customers: a.ConsumedByCustomers, Source: source, ValidFrom: validFrom,
+		Owner: a.Owner, Criticality: a.Criticality, Customers: a.ConsumedByCustomers,
+		Source: source, ValidFrom: validFrom,
 	}
 	for _, dep := range a.DependsOn {
 		gd := graph.DeclaredDep{ToAppSvc: appSvcPHash(dep.To), ToName: dep.To}

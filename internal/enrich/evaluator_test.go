@@ -11,6 +11,7 @@ import (
 func evalCfgOpts(jk JoinKey) EvaluatorOpts {
 	return EvaluatorOpts{
 		ScrapeTarget:   "raw-counters:9116",
+		MappingTarget:  "mapping-server:8443",
 		RemoteWriteURL: "http://mimir:9090/api/v1/push",
 		TenantLabel:    "acme",
 		JoinKey:        jk,
@@ -58,34 +59,52 @@ func remoteWrites(t *testing.T, doc map[string]any) []any {
 	return list
 }
 
-// Test 1: exactly ONE scrape_config and ONE remote_write; remote_write url ==
-// RemoteWriteURL; scrape target contains ScrapeTarget.
-func TestSharedEvaluatorConfig_SingleScrapeAndRemoteWrite(t *testing.T) {
+// staticTargets extracts the static_configs targets of a scrape_config entry.
+func staticTargets(t *testing.T, sc map[string]any) []string {
+	t.Helper()
+	staticCfgs, ok := sc["static_configs"].([]any)
+	if !ok || len(staticCfgs) == 0 {
+		t.Fatalf("scrape_config missing static_configs: %v", sc)
+	}
+	raw, _ := staticCfgs[0].(map[string]any)["targets"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, tgt := range raw {
+		out = append(out, tgt.(string))
+	}
+	return out
+}
+
+// Test 1: exactly TWO scrape_configs (counters + mapping) and ONE remote_write;
+// remote_write url == RemoteWriteURL; the counters job targets ScrapeTarget and
+// the mapping job targets MappingTarget. Without the mapping job the
+// path-health rules would join against a metric the evaluator never ingests.
+func TestSharedEvaluatorConfig_ScrapeJobsAndRemoteWrite(t *testing.T) {
 	for _, jk := range []JoinKey{JoinByComposite, JoinByIfName} {
 		doc := unmarshalEvalCfg(t, jk)
 		opts := evalCfgOpts(jk)
 
 		scs := scrapeConfigs(t, doc)
-		if len(scs) != 1 {
-			t.Errorf("jk=%v: want exactly 1 scrape_config, got %d", jk, len(scs))
+		if len(scs) != 2 {
+			t.Fatalf("jk=%v: want exactly 2 scrape_configs (counters + mapping), got %d", jk, len(scs))
 		}
 
-		// scrape target must contain ScrapeTarget
-		sc := scs[0].(map[string]any)
-		staticCfgs, ok := sc["static_configs"].([]any)
-		if !ok || len(staticCfgs) == 0 {
-			t.Errorf("jk=%v: scrape_config missing static_configs", jk)
-		} else {
-			targets, _ := staticCfgs[0].(map[string]any)["targets"].([]any)
-			found := false
-			for _, tgt := range targets {
-				if strings.Contains(tgt.(string), opts.ScrapeTarget) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("jk=%v: ScrapeTarget %q not found in targets %v", jk, opts.ScrapeTarget, targets)
-			}
+		counters := scs[0].(map[string]any)
+		if jn, _ := counters["job_name"].(string); jn != "promhash-evaluator" {
+			t.Errorf("jk=%v: scrape[0].job_name = %q, want promhash-evaluator", jk, jn)
+		}
+		if tgts := staticTargets(t, counters); len(tgts) != 1 || tgts[0] != opts.ScrapeTarget {
+			t.Errorf("jk=%v: counters targets = %v, want [%s]", jk, tgts, opts.ScrapeTarget)
+		}
+
+		mapping := scs[1].(map[string]any)
+		if jn, _ := mapping["job_name"].(string); jn != "promhash-mapping" {
+			t.Errorf("jk=%v: scrape[1].job_name = %q, want promhash-mapping", jk, jn)
+		}
+		if tgts := staticTargets(t, mapping); len(tgts) != 1 || tgts[0] != opts.MappingTarget {
+			t.Errorf("jk=%v: mapping targets = %v, want [%s]", jk, tgts, opts.MappingTarget)
+		}
+		if mp, _ := mapping["metrics_path"].(string); mp != DefaultMappingMetricsPath {
+			t.Errorf("jk=%v: mapping metrics_path = %q, want %q", jk, mp, DefaultMappingMetricsPath)
 		}
 
 		rws := remoteWrites(t, doc)
@@ -97,6 +116,38 @@ func TestSharedEvaluatorConfig_SingleScrapeAndRemoteWrite(t *testing.T) {
 				t.Errorf("jk=%v: remote_write.url = %q, want %q", jk, url, opts.RemoteWriteURL)
 			}
 		}
+	}
+}
+
+// Test 1b: an explicit MappingMetricsPath overrides the default.
+func TestSharedEvaluatorConfig_MappingMetricsPathOverride(t *testing.T) {
+	opts := evalCfgOpts(JoinByComposite)
+	opts.MappingMetricsPath = "/custom/mapping"
+	raw := SharedEvaluatorConfig(opts)
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	scs := scrapeConfigs(t, doc)
+	mapping := scs[1].(map[string]any)
+	if mp, _ := mapping["metrics_path"].(string); mp != "/custom/mapping" {
+		t.Errorf("mapping metrics_path = %q, want /custom/mapping", mp)
+	}
+}
+
+// Test 1c: an empty MappingTarget omits the mapping job entirely (the CLI
+// rejects that configuration; the renderer stays total).
+func TestSharedEvaluatorConfig_NoMappingTargetOmitsJob(t *testing.T) {
+	opts := evalCfgOpts(JoinByComposite)
+	opts.MappingTarget = ""
+	raw := SharedEvaluatorConfig(opts)
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	scs := scrapeConfigs(t, doc)
+	if len(scs) != 1 {
+		t.Fatalf("want 1 scrape_config when MappingTarget empty, got %d", len(scs))
 	}
 }
 
@@ -172,10 +223,15 @@ func relabelForTargetLabel(t *testing.T, doc map[string]any, wantTarget string) 
 	return nil
 }
 
-// Test 4: JoinByComposite mode — metric_relabel_configs has an entry with
-// target_label=iface, separator=":", source_labels=[instance, ifIndex].
+// Test 4: JoinByComposite mode — the counters job's metric_relabel_configs has
+// an entry with target_label=iface, separator=":", source_labels=[instance,
+// ifIndex]. The mapping job must NOT carry the relabel (its exposition already
+// has an explicit iface label).
 func TestSharedEvaluatorConfig_CompositeMode_IfaceRelabel(t *testing.T) {
 	doc := unmarshalEvalCfg(t, JoinByComposite)
+	if mapping := scrapeConfigs(t, doc)[1].(map[string]any); mapping["metric_relabel_configs"] != nil {
+		t.Errorf("mapping job must not carry metric_relabel_configs: %v", mapping["metric_relabel_configs"])
+	}
 	entry := relabelForTargetLabel(t, doc, "iface")
 	if entry == nil {
 		t.Fatal("JoinByComposite: no metric_relabel entry with target_label=iface")
@@ -226,12 +282,24 @@ func TestSharedEvaluatorConfig_NoPromhashFedJobName(t *testing.T) {
 	}
 }
 
-// Test 6b: "honor_labels" is absent anywhere in the rendered config.
-func TestSharedEvaluatorConfig_NoHonorLabels(t *testing.T) {
+// Test 6b: honor_labels placement. The counters job must NOT set honor_labels
+// (that was the old federation model's bug surface). The mapping job MUST set
+// honor_labels: true — otherwise Prometheus rewrites the mapping's instance
+// label to the mapping server's address (original moved to exported_instance),
+// breaking the on(instance, ifName) join and mislabeling group_right results.
+func TestSharedEvaluatorConfig_HonorLabelsOnlyOnMappingJob(t *testing.T) {
 	for _, jk := range []JoinKey{JoinByComposite, JoinByIfName} {
-		raw := SharedEvaluatorConfig(evalCfgOpts(jk))
-		if strings.Contains(raw, "honor_labels") {
-			t.Errorf("jk=%v: rendered config contains forbidden honor_labels key:\n%s", jk, raw)
+		doc := unmarshalEvalCfg(t, jk)
+		scs := scrapeConfigs(t, doc)
+
+		counters := scs[0].(map[string]any)
+		if hl, ok := counters["honor_labels"]; ok && hl != false {
+			t.Errorf("jk=%v: counters job must not set honor_labels, got %v", jk, hl)
+		}
+
+		mapping := scs[1].(map[string]any)
+		if hl, _ := mapping["honor_labels"].(bool); !hl {
+			t.Errorf("jk=%v: mapping job must set honor_labels: true, got %v", jk, mapping["honor_labels"])
 		}
 	}
 }

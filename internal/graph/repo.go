@@ -43,6 +43,14 @@ func (r *Repo) execWrite(ctx context.Context, fn func(tx neo4j.ManagedTransactio
 	return err
 }
 
+// Ping verifies the database is reachable by running a trivial read query.
+// It is used by readiness probes.
+func (r *Repo) Ping(ctx context.Context) error {
+	_, err := neo4j.ExecuteQuery(ctx, r.drv, "RETURN 1", nil,
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	return err
+}
+
 // EnsureConstraints creates the uniqueness constraints on the "phash" property
 // for every node label used by the graph, if they do not already exist. It is
 // idempotent and safe to call on every startup.
@@ -153,15 +161,17 @@ type DeclaredDep struct {
 }
 
 // DeclaredApp is a complete declared application topology to persist: the
-// application and its service (by phash and name), its owner and consuming
-// customers, and its declared dependencies. Source records the origin of the
-// declaration and ValidFrom the time from which it becomes effective.
+// application and its service (by phash and name), its owner, criticality and
+// consuming customers, and its declared dependencies. Source records the
+// origin of the declaration and ValidFrom the time from which it becomes
+// effective. Criticality is free-form business metadata surfaced by impact
+// queries (empty when undeclared).
 type DeclaredApp struct {
-	AppPHash, App, AppSvcPHash, AppSvc, Owner string
-	Customers                                 []string
-	Deps                                      []DeclaredDep
-	Source                                    string
-	ValidFrom                                 time.Time
+	AppPHash, App, AppSvcPHash, AppSvc, Owner, Criticality string
+	Customers                                              []string
+	Deps                                                   []DeclaredDep
+	Source                                                 string
+	ValidFrom                                              time.Time
 }
 
 // upsertDeclaredAppTx runs the UpsertDeclaredApp Cypher inside the caller's
@@ -175,7 +185,7 @@ type DeclaredApp struct {
 // validFrom being strictly increasing across reloads (see plan task D2).
 func upsertDeclaredAppTx(ctx context.Context, tx neo4j.ManagedTransaction, d DeclaredApp) error {
 	res, err := tx.Run(ctx,
-		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner
+		`MERGE (app:Application {phash:$appPHash}) SET app.name=$app, app.owner=$owner, app.criticality=$criticality
          MERGE (svc:ApplicationService {phash:$svcPHash}) SET svc.name=$appSvc
          MERGE (app)-[:RUNS_AS]->(svc)
          // FOREACH does not collapse cardinality on an empty list, so customer
@@ -204,7 +214,7 @@ func upsertDeclaredAppTx(ctx context.Context, tx neo4j.ManagedTransaction, d Dec
                MATCH (iface:Interface {phash:h.ifacePHash})
                MERGE (path)-[:HOP {seq:h.seq, direction:h.direction}]->(iface)`,
 		map[string]any{
-			"appPHash": d.AppPHash, "app": d.App, "owner": d.Owner,
+			"appPHash": d.AppPHash, "app": d.App, "owner": d.Owner, "criticality": d.Criticality,
 			"svcPHash": d.AppSvcPHash, "appSvc": d.AppSvc,
 			"customers": customersToParams(d.Customers, d.App),
 			"source":    d.Source, "validFrom": d.ValidFrom.Unix(),

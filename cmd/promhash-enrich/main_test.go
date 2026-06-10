@@ -19,6 +19,7 @@ import (
 func testOpts(jk enrich.JoinKey) enrich.EvaluatorOpts {
 	return enrich.EvaluatorOpts{
 		ScrapeTarget:   "raw-counters:9116",
+		MappingTarget:  "mapping-server:8443",
 		RemoteWriteURL: "http://mimir:9090/api/v1/push",
 		TenantLabel:    "test-tenant",
 		JoinKey:        jk,
@@ -318,6 +319,27 @@ func TestPruneLegacyArtifacts_RejectsTraversalAppName(t *testing.T) {
 	// The sentinel file outside outDir must still exist.
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel file outside outDir was removed or made inaccessible: %v", err)
+	}
+}
+
+// Test 8: validateRequiredFlags rejects empty/blank required flags and names
+// every missing one; a fully-populated set passes.
+func TestValidateRequiredFlags(t *testing.T) {
+	if err := validateRequiredFlags("prom:9090", "map:8443", "http://rw/push", "tenant-a"); err != nil {
+		t.Errorf("all flags set: unexpected error: %v", err)
+	}
+
+	err := validateRequiredFlags("prom:9090", "  ", "", "tenant-a")
+	if err == nil {
+		t.Fatal("expected error for missing flags, got nil")
+	}
+	for _, want := range []string{"-mapping-target", "-remote-write-url"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %s; got: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "-main-prom") {
+		t.Errorf("error must not name flags that were provided; got: %v", err)
 	}
 }
 

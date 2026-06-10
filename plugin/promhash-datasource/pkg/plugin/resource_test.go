@@ -37,11 +37,14 @@ func TestCallResourceApps(t *testing.T) {
 	}
 }
 
+// TestCallResourcePathInterfaces asserts the variable query proxies to the
+// /ifaces endpoint and forwards the flat composite-selector list — the shape a
+// dashboard variable consumes directly for iface=~"$iface" filters.
 func TestCallResourcePathInterfaces(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		w.Write([]byte(`[{"device":"rtr-core-1","metricIfName":"Te0/1/2"}]`))
+		w.Write([]byte(`["10.0.0.1:42","10.0.0.2:7"]`))
 	}))
 	defer srv.Close()
 	ds := &Datasource{apiURL: srv.URL, hc: srv.Client()}
@@ -50,17 +53,17 @@ func TestCallResourcePathInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/apps/payments/path" {
-		t.Fatalf("upstream path = %q, want /apps/payments/path", gotPath)
+	if gotPath != "/apps/payments/ifaces" {
+		t.Fatalf("upstream path = %q, want /apps/payments/ifaces", gotPath)
 	}
 	if cs.status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", cs.status)
 	}
-	var out []map[string]string
+	var out []string
 	if err := json.Unmarshal(cs.body, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out) != 1 || out[0]["device"] != "rtr-core-1" {
+	if len(out) != 2 || out[0] != "10.0.0.1:42" {
 		t.Fatalf("body = %v", out)
 	}
 }

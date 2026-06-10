@@ -9,6 +9,7 @@ const sample = `
 app: payments
 runs_as: payments-api
 owner: team-payments
+criticality: tier-1
 consumed_by_customers: [acme, globex]
 depends_on:
   - to: ledger-api
@@ -74,6 +75,9 @@ func TestParse(t *testing.T) {
 	}
 	if d.App != "payments" || d.RunsAs != "payments-api" {
 		t.Fatalf("got %+v", d)
+	}
+	if d.Criticality != "tier-1" {
+		t.Fatalf("criticality = %q, want tier-1", d.Criticality)
 	}
 	if len(d.DependsOn) != 1 || d.DependsOn[0].To != "ledger-api" {
 		t.Fatal("dep parse")
