@@ -1,0 +1,125 @@
+name: promhash-demo
+
+# Local end-to-end demo: synthetic SNMP metrics -> main Prometheus ->
+# remote_write -> promhash Prometheus (receiver) evaluating the generated
+# path-health rules; graph + API + alert enrichment on the side.
+# See demo/README.md for what to look at once it is up.
+
+services:
+  neo4j:
+    image: neo4j:5.23
+    environment:
+      NEO4J_AUTH: neo4j/demopass
+    ports: ["7474:7474", "7687:7687"]
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p demopass 'RETURN 1' || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Synthetic three-router topology with moving counters, a near-saturated
+  # trunk, and one flapping interface. Scraped once per device via ?device=.
+  demo-exporter:
+    build: ..
+    command: ["promhash-demo-exporter", "-listen", ":9116"]
+
+  # The "existing estate": scrapes the demo devices from file_sd target files
+  # that carry hostname + ip labels (mirroring production), evaluates the
+  # InterfaceDown alert, and remote_writes the if* counters + ALERTS to the
+  # promhash Prometheus. Its only promhash-specific config is that one
+  # remote_write block and pointing alerting at the enrichment proxy.
+  main-prom:
+    image: prom/prometheus:v2.53.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+    ports: ["9090:9090"]
+    depends_on: [demo-exporter]
+
+  # Long-term storage stand-in; accepts the promhash Prometheus remote_write.
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.103.0
+    ports: ["8428:8428"]
+
+  # One-shot bootstrap: catalog sync (device names from the hostname label),
+  # load the demo declarations, generate the _shared/ projection artifacts
+  # into the shared volume.
+  init:
+    build: ..
+    entrypoint: ["/bin/sh", "/demo/init.sh"]
+    environment:
+      NEO4J_PASS: demopass
+    volumes:
+      - ./init.sh:/demo/init.sh:ro
+      - ./declared:/demo/declared:ro
+      - artifacts:/artifacts
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      main-prom:
+        condition: service_started
+
+  # Serves the generated mapping.prom to the promhash Prometheus.
+  mapping:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/mapping.conf:/etc/nginx/conf.d/default.conf:ro
+      - artifacts:/artifacts:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # The promhash Prometheus: remote-write receiver running the generated
+  # evaluator.yaml + path-health rules and alerts.
+  promhash-prom:
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/artifacts/_shared/evaluator.yaml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - artifacts:/artifacts:ro
+    ports: ["9091:9090"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mapping:
+        condition: service_started
+
+  api:
+    build: ..
+    command: ["promhash-api", "-neo4j", "bolt://neo4j:7687", "-addr", ":8080"]
+    environment:
+      NEO4J_PASS: demopass
+      PROMHASH_API_TOKENS: demo-token
+    ports: ["8080:8080"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["9093:9093"]
+
+  # Enrichment proxy between main-prom and Alertmanager: stamps blast radius
+  # from the graph onto firing alerts.
+  alert-proxy:
+    build: ..
+    command:
+      - promhash-alert-proxy
+      - -listen
+      - :9094
+      - -upstreams
+      - http://alertmanager:9093
+      - -promhash-api
+      - http://api:8080
+    environment:
+      PROMHASH_API_TOKEN: demo-token
+    ports: ["9094:9094"]
+    depends_on: [api, alertmanager]
+
+volumes:
+  artifacts:

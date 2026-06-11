@@ -1,0 +1,17 @@
+# Demo declaration: payments crosses the healthy, near-saturated trunk —
+# watch app:path_util_max:ratio sit around 0.88.
+app: payments
+runs_as: payments-api
+owner: team-payments
+criticality: tier-1
+
+consumed_by_customers:
+  - acme
+
+depends_on:
+  - to: ledger-api
+    path:
+      hops:
+        - {device: rtr-edge-1, if: Te0/0/1, direction: egress}
+        - {device: rtr-core-1, if: trunk-dc, direction: transit} # matched by ifAlias
+        - {device: rtr-dc-1, if: Te1/0/0, direction: ingress}

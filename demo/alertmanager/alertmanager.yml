@@ -1,0 +1,7 @@
+route:
+  receiver: blackhole
+  group_by: [alertname, instance, ifIndex]
+
+receivers:
+  # The demo only inspects alerts in the Alertmanager UI; nothing is notified.
+  - name: blackhole

@@ -1,0 +1,7 @@
+.git
+gitops/
+plugin/promhash-datasource/node_modules/
+plugin/promhash-datasource/dist/
+demo/
+docs/
+*.md

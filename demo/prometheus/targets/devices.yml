@@ -1,0 +1,14 @@
+# Demo file_sd target file — mirrors the production pattern: every target
+# carries both the management IP and the hostname as labels.
+- targets: ["demo-exporter:9116"]
+  labels:
+    hostname: rtr-edge-1
+    ip: 10.0.0.1
+- targets: ["demo-exporter:9116"]
+  labels:
+    hostname: rtr-core-1
+    ip: 10.0.0.2
+- targets: ["demo-exporter:9116"]
+  labels:
+    hostname: rtr-dc-1
+    ip: 10.0.0.3

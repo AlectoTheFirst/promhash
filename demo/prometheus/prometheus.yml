@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    # promhash-alert-proxy enriches in flight and forwards to Alertmanager.
+    - static_configs:
+        - targets: ["alert-proxy:9094"]
+
+scrape_configs:
+  - job_name: snmp-demo
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/*.yml"]
+    relabel_configs:
+      # snmp_exporter-style: tell the (demo) exporter which device to render.
+      - source_labels: [hostname]
+        target_label: __param_device
+      # instance = the device management IP, as in the production target files.
+      - source_labels: [ip]
+        target_label: instance
+
+remote_write:
+  # The one promhash-related block: feed the raw counters (and interface
+  # alerts) to the promhash Prometheus receiver.
+  - url: http://promhash-prom:9090/api/v1/write
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: ifHCInOctets|ifHCOutOctets|ifHighSpeed|ifOperStatus|ifInErrors|ifOutErrors|ifInDiscards|ifOutDiscards|ALERTS
+        action: keep

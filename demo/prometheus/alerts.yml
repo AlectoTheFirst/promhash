@@ -1,0 +1,10 @@
+groups:
+  - name: demo_interface_alerts
+    rules:
+      - alert: InterfaceDown
+        expr: ifOperStatus != 1
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.hostname }} {{ $labels.ifName }} is oper-down"

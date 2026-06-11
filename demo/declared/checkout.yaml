@@ -1,0 +1,18 @@
+# Demo declaration: checkout crosses the FLAPPING interface (rtr-core-1
+# Te0/1/1 goes down for 90s every 10 minutes), so InterfaceDown fires and the
+# enrichment proxy stamps checkout/globex blast radius onto the alert.
+app: checkout
+runs_as: checkout-api
+owner: team-shop
+criticality: tier-2
+
+consumed_by_customers:
+  - globex
+
+depends_on:
+  - to: cart-api
+    path:
+      hops:
+        - {device: rtr-edge-1, if: Te0/0/1, direction: egress}
+        - {device: rtr-core-1, if: Te0/1/1, direction: transit}
+        - {device: rtr-dc-1, if: Te1/0/0, direction: ingress}
