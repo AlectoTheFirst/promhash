@@ -34,7 +34,7 @@ promhash-loader -dir /demo/declared -neo4j "$NEO" -source demo
 echo "init: generating projection artifacts..."
 promhash-enrich -neo4j "$NEO" -apps payments,checkout -out /artifacts \
   -mapping-target mapping:80 \
-  -remote-write-url http://victoriametrics:8428/api/v1/write \
+  -remote-write-url http://lts-prom:9090/api/v1/write \
   -tenant-label demo
 
 echo "init: done — artifacts in /artifacts/_shared"

@@ -1,0 +1,5 @@
+# Long-term-storage stand-in: a pure remote-write receiver. No scrapes, no
+# rules — it only stores what the promhash Prometheus pushes (the app:* series
+# with the tenant external label).
+global:
+  scrape_interval: 1m

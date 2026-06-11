@@ -38,10 +38,16 @@ services:
     ports: ["9090:9090"]
     depends_on: [demo-exporter]
 
-  # Long-term storage stand-in; accepts the promhash Prometheus remote_write.
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.103.0
-    ports: ["8428:8428"]
+  # Long-term storage stand-in: a plain Prometheus acting as a pure
+  # remote-write receiver (no scrapes, no rules), queryable on :9092.
+  lts-prom:
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus/lts-prom.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9092:9090"]
 
   # One-shot bootstrap: catalog sync (device names from the hostname label),
   # load the demo declarations, generate the _shared/ projection artifacts

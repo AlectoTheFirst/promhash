@@ -37,7 +37,7 @@ are the two curated apps.
 | http://localhost:9091 | promhash Prometheus: query `app:path_util_max:ratio` (payments ≈ 0.88), `app:path_hops_down:count` (checkout 1 during flaps, explicit 0 otherwise), `app:path_alerts_firing:count`, and the `Promhash*` meta-alerts under Alerts |
 | http://localhost:9093 | Alertmanager: during a flap, `InterfaceDown` arrives **enriched** — `promhash_max_criticality`, `promhash_app_count` labels and the `promhash_impact` annotation naming checkout/globex |
 | http://localhost:8080 | promhash-api (token `demo-token`): `curl -H 'Authorization: Bearer demo-token' localhost:8080/apps/checkout/path` and `…/impact?device=rtr-core-1&ifName=Te0/1/1` |
-| http://localhost:8428 | VictoriaMetrics (LTS stand-in): the remote-written `app:*` series with the `tenant=demo` label |
+| http://localhost:9092 | LTS Prometheus (remote-write receiver stand-in): the remote-written `app:*` series with the `tenant=demo` label |
 | http://localhost:7474 | Neo4j browser (neo4j / demopass): the graph itself |
 
 Within ~10 minutes of startup you will see one full flap cycle: interface
