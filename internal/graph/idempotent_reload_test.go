@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/testutil"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // TestReloadIdempotentUnderRetry guards the idempotency invariant for

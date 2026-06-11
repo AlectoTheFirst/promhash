@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/catalog"
 	"github.com/AlectoTheFirst/promhash/internal/declare"
 	"github.com/AlectoTheFirst/promhash/internal/graph"
 	"github.com/AlectoTheFirst/promhash/internal/phash"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 func main() {

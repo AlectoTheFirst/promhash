@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/testutil"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // seedIface upserts a single Interface node and fails the test on error.

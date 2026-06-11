@@ -39,16 +39,16 @@ func TestCanonAristaEtFoldsToEthernet(t *testing.T) {
 // representative set of inputs that previously relied on those rows.
 func TestCanonDeadSelfMapRemovalSafe(t *testing.T) {
 	cases := map[[2]string]string{
-		{"cisco", "Te0/1/2"}:             "tengige0/1/2",
-		{"cisco", "Gi0/1"}:               "gigabitethernet0/1",
-		{"cisco", "Fa0/1"}:               "fastethernet0/1",
-		{"cisco", "Hu1/1"}:               "hundredgige1/1",
-		{"arista", "Eth1"}:               "ethernet1",
-		{"cisco", "TenGigE0/1/2"}:        "tengige0/1/2",
-		{"cisco", "GigabitEthernet0/1"}:  "gigabitethernet0/1",
-		{"cisco", "FastEthernet0/1"}:     "fastethernet0/1",
-		{"cisco", "HundredGigE1/1"}:      "hundredgige1/1",
-		{"arista", "Ethernet1"}:          "ethernet1",
+		{"cisco", "Te0/1/2"}:            "tengige0/1/2",
+		{"cisco", "Gi0/1"}:              "gigabitethernet0/1",
+		{"cisco", "Fa0/1"}:              "fastethernet0/1",
+		{"cisco", "Hu1/1"}:              "hundredgige1/1",
+		{"arista", "Eth1"}:              "ethernet1",
+		{"cisco", "TenGigE0/1/2"}:       "tengige0/1/2",
+		{"cisco", "GigabitEthernet0/1"}: "gigabitethernet0/1",
+		{"cisco", "FastEthernet0/1"}:    "fastethernet0/1",
+		{"cisco", "HundredGigE1/1"}:     "hundredgige1/1",
+		{"arista", "Ethernet1"}:         "ethernet1",
 	}
 	for in, want := range cases {
 		if got := CanonicalIfName(in[0], in[1]); got != want {
@@ -116,7 +116,7 @@ func TestDeviceNormWhitespaceAndFullWidthSharePHash(t *testing.T) {
 		"rtr1",
 		"Rtr1",
 		"  rtr1  ",
-		"rtr 1",   // NBSP between prefix and suffix
+		"rtr 1",  // NBSP between prefix and suffix
 		"rtr  1", // multiple NBSP
 	}
 	for _, dev := range variants {

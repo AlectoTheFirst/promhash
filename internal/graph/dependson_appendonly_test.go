@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/testutil"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // TestDependsOnAppendOnlyAcrossReloads asserts that the DEPENDS_ON edge is
