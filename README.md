@@ -438,6 +438,20 @@ alerting:
         - targets: ['promhash-alert-proxy:9094']
 ```
 
+**What makes an alert enrichable.** The proxy correlates on the alert's labels, so the alert expression must preserve the interface identity labels rather than aggregating them away. A plain comparison keeps all series labels:
+
+```yaml
+- alert: InterfaceDown
+  expr: ifOperStatus != 1        # keeps instance, ifIndex, ifName, hostname
+  for: 1m
+  labels:
+    severity: page
+  annotations:
+    summary: "{{ $labels.hostname }} {{ $labels.ifName }} is oper-down"
+```
+
+An expression wrapped in `sum(...)` or `count(...)` drops those labels and the alert passes through un-enriched (counted in `..._passthrough_total{reason="no_key"}`). The label names are configurable (`-device-label`, `-ifindex-label`, `-ifname-label`) if your rules use different ones.
+
 Enrichment lands in two places, deliberately split:
 
 - **Labels** carry only bounded, slow-changing scalars: `promhash_max_criticality`, `promhash_app_count`, `promhash_customer_impact`. Labels define the alert fingerprint and are routable, so Alertmanager can page differently on customer impact. The high-cardinality app set is never a label.
@@ -549,7 +563,17 @@ app:path_discards:rate5m     = (sum by(app, service)(app:if_in_discards:rate5m) 
 app:path_alerts_firing:count = sum by(app, service)(app:if_alerts_firing:count)
 ```
 
-- **`path-health.alerts.yaml`**: alerting rules in two layers. Pipeline meta-alerts turn the system's signature failure mode, silent emptiness, into pages: mapping absent or its scrape down, the raw-counter `remote_write` feed stale, and mapping drift (mapping rows whose join key matches no counter series, i.e. an interface renamed, renumbered, or retired since the last enrich run). Path alerts cover hops down (annotated with the ECMP caveat: a down hop may be a redundant candidate), sustained worst-hop utilization above 90%, and sustained interface errors.
+- **`path-health.alerts.yaml`**: alerting rules in two layers. Pipeline meta-alerts turn the system's signature failure mode, silent emptiness, into pages; path alerts cover the health of the declared paths themselves. Route them through your existing Alertmanager; promhash ships none of its own.
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| `PromhashMappingAbsent` | `promhash_interface_app` missing entirely (mapping file empty or never ingested); every path-health rule evaluates to nothing | critical |
+| `PromhashMappingScrapeDown` | the mapping scrape target is down | critical |
+| `PromhashCountersStale` | newest `ifHCInOctets` sample older than 5 minutes; the `remote_write` feed from the main Prometheus has stalled | critical |
+| `PromhashMappingDrift` | mapping rows whose join key matches no counter series for 30 minutes: an interface renamed, renumbered, or retired since the last enrich run | warning |
+| `PromhashPathHopDown` | `app:path_hops_down:count > 0` for 5 minutes (annotated with the ECMP caveat: a down hop may be a redundant candidate) | warning |
+| `PromhashPathUtilizationHigh` | `app:path_util_max:ratio > 0.9` for 15 minutes | warning |
+| `PromhashPathErrors` | non-zero path error rate for 15 minutes | warning |
 - **`evaluator.yaml`**: the promhash Prometheus config (`SharedEvaluatorConfig`). It scrapes the served `mapping.prom` with `honor_labels: true` (so the mapping's `instance`/`ifIndex`/`iface` identity labels survive; without this job the path-health rules join against a metric the evaluator never ingests and evaluate to nothing), loads both rule files, and remote-writes once with `global.external_labels.tenant`. It contains no counters scrape job: the raw counters arrive via `remote_write` from the main Prometheus, and remote-written samples are never relabeled by the receiver, so the config carries no relabel configuration either.
 
 The main Prometheus needs exactly one block (the only change ever made to it), and the promhash Prometheus is started with `--web.enable-remote-write-receiver`:
@@ -601,6 +625,8 @@ curl -s "localhost:8080/interface-apps?device=rtr-core-1&ifName=tengige0/1/2" | 
 ```bash
 curl -s "localhost:8080/impact?device=rtr-core-1&ifName=tengige0/1/2&at=1700000100" | jq
 ```
+
+**Enrich network alerts with blast radius.** Run `promhash-alert-proxy` and point the main Prometheus `alerting:` block at it instead of Alertmanager (see [Alert enrichment proxy](#alert-enrichment-proxy)). Interface alerts whose expressions keep the `instance`/`ifIndex` labels arrive in Alertmanager carrying `promhash_app_count`, `promhash_customer_impact`, and `promhash_max_criticality` labels (routable) and the full affected-app list in the `promhash_impact` annotation (rendered by notification templates; behind the "Info" button in the Alertmanager UI).
 
 **Keep the catalog fresh.** Schedule `promhash-catalog` (for example, every few minutes). It re-reads the live interface labels so renamed or renumbered interfaces are picked up before the next enrichment run.
 
