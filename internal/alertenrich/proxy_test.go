@@ -1,0 +1,205 @@
+package alertenrich
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/AlectoTheFirst/promhash/internal/graph"
+)
+
+// fakeClient returns canned rows/err regardless of input.
+type fakeClient struct {
+	rows []graph.ImpactRow
+	err  error
+}
+
+func (f fakeClient) ImpactByInstanceIndex(_ context.Context, _ string, _ int, _ time.Time) ([]graph.ImpactRow, error) {
+	return f.rows, f.err
+}
+func (f fakeClient) ImpactByName(_ context.Context, _, _ string, _ time.Time) ([]graph.ImpactRow, error) {
+	return f.rows, f.err
+}
+
+// blockingClient blocks until the context is cancelled, to exercise the timeout.
+type blockingClient struct{}
+
+func (blockingClient) ImpactByInstanceIndex(ctx context.Context, _ string, _ int, _ time.Time) ([]graph.ImpactRow, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (blockingClient) ImpactByName(ctx context.Context, _, _ string, _ time.Time) ([]graph.ImpactRow, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// captureAM is a fake upstream Alertmanager that records the last forwarded body.
+func captureAM(t *testing.T, last *[]byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/alerts" {
+			t.Errorf("upstream path %s", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		*last = b
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
+func baseCfg(client ImpactClient, upstreams []string) ProxyConfig {
+	return ProxyConfig{
+		Client:     client,
+		Upstreams:  upstreams,
+		LabelMap:   LabelMap{DeviceLabel: "instance", IfIndexLabel: "ifIndex", IfNameLabel: "ifName"},
+		Render:     RenderCfg{Prefix: "promhash_", EnrichLabels: true},
+		Timeout:    time.Second,
+		Registerer: prometheus.NewRegistry(),
+		Now:        func() time.Time { return time.Unix(1700000600, 0) }, // after sample endsAt below
+	}
+}
+
+const firingBatch = `[{"labels":{"alertname":"IfDown","instance":"10.0.0.1:161","ifIndex":"42"},
+"annotations":{"summary":"x"},"startsAt":"2026-06-03T10:00:00Z","endsAt":"2030-01-01T00:00:00Z",
+"generatorURL":"http://prom"}]`
+
+func postAlerts(t *testing.T, p *Proxy, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(body))
+	p.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestProxyEnrichesAndForwards(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	p := NewProxy(baseCfg(fakeClient{rows: twoRows()}, []string{am.URL}))
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	var out []map[string]any
+	if err := json.Unmarshal(last, &out); err != nil {
+		t.Fatalf("forwarded body not JSON: %v (%s)", err, last)
+	}
+	labels := out[0]["labels"].(map[string]any)
+	if labels["promhash_app_count"] != "2" || labels["promhash_max_criticality"] != "critical" {
+		t.Fatalf("labels not stamped: %+v", labels)
+	}
+	annotations := out[0]["annotations"].(map[string]any)
+	if annotations["promhash_blast_radius"] != "2 apps, 1 customer" {
+		t.Fatalf("annotation not stamped: %+v", annotations)
+	}
+	// Untouched field preserved.
+	if out[0]["generatorURL"] != "http://prom" {
+		t.Fatalf("generatorURL lost: %+v", out[0])
+	}
+}
+
+func TestProxyFailOpenOnClientError(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	p := NewProxy(baseCfg(fakeClient{err: io.ErrUnexpectedEOF}, []string{am.URL}))
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	var out []map[string]any
+	_ = json.Unmarshal(last, &out)
+	if _, found := out[0]["labels"].(map[string]any)["promhash_app_count"]; found {
+		t.Fatal("alert must be forwarded unchanged on client error")
+	}
+}
+
+func TestProxyFailOpenOnTimeout(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	cfg := baseCfg(blockingClient{}, []string{am.URL})
+	cfg.Timeout = 20 * time.Millisecond
+	p := NewProxy(cfg)
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	var out []map[string]any
+	_ = json.Unmarshal(last, &out)
+	if _, found := out[0]["labels"].(map[string]any)["promhash_app_count"]; found {
+		t.Fatal("alert must be forwarded unchanged on timeout")
+	}
+}
+
+func TestProxyNoKeyPassthrough(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	p := NewProxy(baseCfg(fakeClient{rows: twoRows()}, []string{am.URL}))
+	// No instance/ifIndex/ifName labels => no key => unchanged.
+	rec := postAlerts(t, p, `[{"labels":{"alertname":"X"},"annotations":{}}]`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	var out []map[string]any
+	_ = json.Unmarshal(last, &out)
+	if len(out[0]["labels"].(map[string]any)) != 1 {
+		t.Fatalf("labels mutated for un-correlatable alert: %+v", out[0]["labels"])
+	}
+}
+
+func TestProxyAllUpstreamsFail500(t *testing.T) {
+	p := NewProxy(baseCfg(fakeClient{rows: twoRows()}, []string{"http://127.0.0.1:1"})) // unroutable
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code < 500 {
+		t.Fatalf("expected 5xx when all upstreams fail, got %d", rec.Code)
+	}
+}
+
+func TestProxyBadJSON400(t *testing.T) {
+	p := NewProxy(baseCfg(fakeClient{}, []string{"http://example"}))
+	rec := postAlerts(t, p, `not json`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+// TestProxyResolvedKeepsLabelsDropsAnnotation asserts that for a resolved alert
+// with EnrichResolved=false the derived LABELS are still applied (fingerprint
+// match) but the impact ANNOTATION is omitted.
+func TestProxyResolvedKeepsLabelsDropsAnnotation(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	cfg := baseCfg(fakeClient{rows: twoRows()}, []string{am.URL})
+	cfg.EnrichResolved = false
+	cfg.Now = func() time.Time { return time.Unix(1700000600, 0) }
+	p := NewProxy(cfg)
+	// endsAt in the past relative to Now => resolved.
+	resolved := `[{"labels":{"alertname":"IfDown","instance":"10.0.0.1:161","ifIndex":"42"},
+"annotations":{"summary":"x"},"startsAt":"2023-11-14T00:00:00Z","endsAt":"2023-11-14T22:13:00Z"}]`
+	rec := postAlerts(t, p, resolved)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	var out []map[string]any
+	_ = json.Unmarshal(last, &out)
+	if out[0]["labels"].(map[string]any)["promhash_app_count"] != "2" {
+		t.Fatal("resolved alert must still carry derived labels (fingerprint match)")
+	}
+	if _, found := out[0]["annotations"].(map[string]any)["promhash_blast_radius"]; found {
+		t.Fatal("resolved annotation must be omitted when EnrichResolved is false")
+	}
+}
