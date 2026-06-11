@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"time"
@@ -19,10 +20,13 @@ import (
 // IfaceRow holds the identifying labels for a single network interface as
 // reported by a Prometheus target. The string fields correspond to the
 // instance and SNMP ifTable labels (ifName, ifDescr, ifAlias), while IfIndex
-// is the numeric SNMP ifIndex.
+// is the numeric SNMP ifIndex. Device is the value of the configured device
+// label (see HarvestInterfaces) — the human device name carried on the target
+// (e.g. a hostname label from file_sd target files); empty when the label is
+// not configured or absent from the series.
 type IfaceRow struct {
-	Instance, IfName, IfDescr, IfAlias string
-	IfIndex                            int
+	Instance, Device, IfName, IfDescr, IfAlias string
+	IfIndex                                    int
 }
 
 // CapRow holds the interface capacity and operational status for a single
@@ -60,7 +64,20 @@ func NewWithTimeout(addr string, timeout time.Duration) (*Client, error) {
 	return &Client{api: v1.NewAPI(c)}, nil
 }
 
-const harvestQuery = `group by (instance, ifIndex, ifName, ifDescr, ifAlias) (ifHCInOctets)`
+// labelNameRe is the Prometheus label-name grammar. The device label is
+// interpolated into the harvest query, so it must be validated against this
+// (not just for correctness — an arbitrary string would be query injection).
+var labelNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// harvestQuery builds the interface-harvest query, optionally grouping by an
+// additional device label. deviceLabel must be pre-validated by the caller.
+func harvestQuery(deviceLabel string) string {
+	labels := "instance, ifIndex, ifName, ifDescr, ifAlias"
+	if deviceLabel != "" {
+		labels += ", " + deviceLabel
+	}
+	return "group by (" + labels + ") (ifHCInOctets)"
+}
 
 // queryAttempts is the number of total tries for the Prometheus Query call.
 // It is a package-level var so tests can reduce it without subclassing.
@@ -115,15 +132,22 @@ func (c *Client) queryVector(ctx context.Context, query string) (model.Vector, e
 }
 
 // HarvestInterfaces queries Prometheus for the set of known interfaces and
-// returns one IfaceRow per series. skipped counts series whose ifIndex label
-// was present but non-numeric (those rows are not appended). An absent ifIndex
-// label is allowed and yields IfIndex=0. An empty vector (zero series) is not
-// an error. A non-vector result type (matrix, scalar, string) is an error.
+// returns one IfaceRow per series. deviceLabel, when non-empty, names the
+// series label that carries the human device name (e.g. "hostname" stamped by
+// file_sd target files); it is added to the harvest grouping and surfaced as
+// IfaceRow.Device. An invalid label name is an error (it would otherwise be
+// query injection). skipped counts series whose ifIndex label was present but
+// non-numeric (those rows are not appended). An absent ifIndex label is
+// allowed and yields IfIndex=0. An empty vector (zero series) is not an
+// error. A non-vector result type (matrix, scalar, string) is an error.
 //
 // The underlying Query call is retried on transient errors (not on context
 // cancellation or deadline).
-func (c *Client) HarvestInterfaces(ctx context.Context) (rows []IfaceRow, skipped int, err error) {
-	vec, err := c.queryVector(ctx, harvestQuery)
+func (c *Client) HarvestInterfaces(ctx context.Context, deviceLabel string) (rows []IfaceRow, skipped int, err error) {
+	if deviceLabel != "" && !labelNameRe.MatchString(deviceLabel) {
+		return nil, 0, fmt.Errorf("promclient: invalid device label name %q", deviceLabel)
+	}
+	vec, err := c.queryVector(ctx, harvestQuery(deviceLabel))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -139,8 +163,12 @@ func (c *Client) HarvestInterfaces(ctx context.Context) (rows []IfaceRow, skippe
 				continue
 			}
 		}
+		var dev string
+		if deviceLabel != "" {
+			dev = string(s.Metric[model.LabelName(deviceLabel)])
+		}
 		out = append(out, IfaceRow{
-			Instance: string(s.Metric["instance"]), IfName: string(s.Metric["ifName"]),
+			Instance: string(s.Metric["instance"]), Device: dev, IfName: string(s.Metric["ifName"]),
 			IfDescr: string(s.Metric["ifDescr"]), IfAlias: string(s.Metric["ifAlias"]), IfIndex: idx})
 	}
 	return out, skipped, nil

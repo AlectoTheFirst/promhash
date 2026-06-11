@@ -22,7 +22,7 @@ func main() {
 }
 
 func run() error {
-	var promURL, neoURL, neoUser, neoPass, nbURL, nbToken, vendor string
+	var promURL, neoURL, neoUser, neoPass, nbURL, nbToken, vendor, deviceLabel string
 	var timeout time.Duration
 	flag.StringVar(&promURL, "prometheus", "http://localhost:9090", "Prometheus base URL")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "Neo4j bolt URL")
@@ -31,6 +31,7 @@ func run() error {
 	flag.StringVar(&nbURL, "nautobot", "", "Nautobot base URL")
 	flag.StringVar(&nbToken, "nautobot-token", "", "")
 	flag.StringVar(&vendor, "vendor", "cisco", "default vendor for canonicalization")
+	flag.StringVar(&deviceLabel, "device-label", "hostname", "series label carrying the human device name (set by file_sd target labels); empty to disable")
 	flag.DurationVar(&timeout, "timeout", 60*time.Second, "per-call deadline for upstream HTTP requests")
 	flag.Parse()
 	if neoPass == "" {
@@ -57,7 +58,7 @@ func run() error {
 		return err
 	}
 	hctx, hcancel := context.WithTimeout(ctx, timeout)
-	rows, skipped, err := pc.HarvestInterfaces(hctx)
+	rows, skipped, err := pc.HarvestInterfaces(hctx, deviceLabel)
 	hcancel()
 	if err != nil {
 		return err

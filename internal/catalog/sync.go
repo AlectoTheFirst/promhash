@@ -19,15 +19,23 @@ func ifacePHash(device, canonicalIfName string) string {
 // (device, ifName), binding the real metric labels and current ifIndex.
 // Rows whose normalized device or canonical ifName contain ':' or control
 // characters are skipped with a warning rather than aborting the batch.
+//
+// Device-name precedence per row: the harvested device label (row.Device,
+// e.g. a hostname label stamped by file_sd target files) wins; then the
+// optional Nautobot instance→device map; then the raw instance as a last
+// resort.
 func Sync(ctx context.Context, r *graph.Repo, rows []promclient.IfaceRow,
 	devByInstance map[string]string, vendor string) error {
 	now := time.Now().UTC()
 	var skipped int
 	for _, row := range rows {
-		raw := devByInstance[row.Instance]
+		raw := row.Device
+		if raw == "" {
+			raw = devByInstance[row.Instance]
+		}
 		if raw == "" {
 			raw = row.Instance
-		} // fall back to instance if unmapped
+		}
 		dev := phash.NormDevice(raw)
 		canon := CanonicalIfName(vendor, row.IfName)
 		if canon == "" {

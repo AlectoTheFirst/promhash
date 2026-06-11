@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,7 +19,7 @@ func TestHarvestInterfaces(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
-	rows, skipped, err := c.HarvestInterfaces(context.Background())
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func TestHarvestNonVectorErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
-	rows, skipped, err := c.HarvestInterfaces(context.Background())
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "")
 	if err == nil {
 		t.Fatalf("expected non-nil error for matrix result, got rows=%v skipped=%d", rows, skipped)
 	}
@@ -58,7 +59,7 @@ func TestHarvestEmptyVectorNoError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
-	rows, skipped, err := c.HarvestInterfaces(context.Background())
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "")
 	if err != nil {
 		t.Fatalf("expected nil error for empty vector, got %v", err)
 	}
@@ -83,7 +84,7 @@ func TestHarvestBadIfIndexSkipped(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
-	rows, skipped, err := c.HarvestInterfaces(context.Background())
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestHarvestMissingIfIndexAllowed(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
-	rows, skipped, err := c.HarvestInterfaces(context.Background())
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestHarvestRespectsContextDeadline(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, callErr := c.HarvestInterfaces(ctx)
+	_, _, callErr := c.HarvestInterfaces(ctx, "")
 	elapsed := time.Since(start)
 
 	if callErr == nil {
@@ -179,7 +180,7 @@ func TestClientTimeoutFires(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, _, callErr := c.HarvestInterfaces(context.Background())
+	_, _, callErr := c.HarvestInterfaces(context.Background(), "")
 	elapsed := time.Since(start)
 
 	if callErr == nil {
@@ -353,5 +354,50 @@ func TestCapacityStatusNonVectorError(t *testing.T) {
 	rows, skipped, err := c.CapacityStatus(context.Background())
 	if err == nil {
 		t.Fatalf("expected non-nil error for matrix result, got rows=%v skipped=%d", rows, skipped)
+	}
+}
+
+// TestHarvestDeviceLabel asserts the device label is added to the harvest
+// grouping and surfaced as IfaceRow.Device.
+func TestHarvestDeviceLabel(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotQuery = r.Form.Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+{"metric":{"instance":"10.0.0.1:161","hostname":"rtr-core-1","ifIndex":"42","ifName":"Te0/1/2"},"value":[1,"1"]}
+]}}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, skipped, err := c.HarvestInterfaces(context.Background(), "hostname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 0 || len(rows) != 1 {
+		t.Fatalf("rows=%d skipped=%d", len(rows), skipped)
+	}
+	if rows[0].Device != "rtr-core-1" || rows[0].Instance != "10.0.0.1:161" {
+		t.Fatalf("row %+v", rows[0])
+	}
+	if !strings.Contains(gotQuery, ", hostname)") {
+		t.Fatalf("harvest query missing device label grouping: %q", gotQuery)
+	}
+}
+
+// TestHarvestInvalidDeviceLabelRejected asserts a non-label-grammar name is
+// refused before any query is issued (injection guard).
+func TestHarvestInvalidDeviceLabelRejected(t *testing.T) {
+	c, err := New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.HarvestInterfaces(context.Background(), `x) or (up`); err == nil {
+		t.Fatal("expected error for invalid device label name")
 	}
 }
