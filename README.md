@@ -18,6 +18,7 @@ The infrastructure metrics themselves are never tagged with an `app` label. The 
 - [Data model](#data-model)
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
+- [Demo](#demo)
 - [Declaring application paths](#declaring-application-paths)
 - [Command-line tools](#command-line-tools)
 - [HTTP API](#http-api)
@@ -47,8 +48,9 @@ promhash keeps the many-to-many relationship in a graph, where it belongs, and s
 ## How it works
 
 ```
- (1) SYNC      main Prometheus ──► promhash-catalog (scheduled; + Nautobot) ──► interface catalog
-               harvests the real ifName/ifDescr/ifAlias/ifIndex labels          (Neo4j)
+ (1) SYNC      main Prometheus ──► promhash-catalog (scheduled) ──► interface catalog
+               harvests the real ifName/ifDescr/ifAlias/ifIndex      (Neo4j)
+               labels + the hostname target label (-device-label)
 
  (2) DECLARE   declared/<app>.yaml ── pull request ──► CI: promhash-loader -validate-only
                app, owner, customers,                  every device/if reference resolved
@@ -136,7 +138,7 @@ Notes that shape the whole system:
 | Neo4j 5 | The graph store | Memgraph also works (both speak Cypher) |
 | Prometheus (main) | Interface catalog + raw counter source | The existing estate; must expose `ifHC*Octets` with `ifName`/`ifDescr`/`ifAlias`/`ifIndex` labels. Untouched except one `remote_write` block |
 | Prometheus (promhash) | Rule evaluation for curated apps | A small dedicated instance started with `--web.enable-remote-write-receiver`; receives the raw counters from the main Prometheus |
-| Nautobot | Optional | Device → management-IP (`instance`) mapping |
+| Nautobot | Optional fallback | `instance` → device-name mapping, only for targets that carry no hostname-style label; unnecessary when `file_sd` target files stamp a `hostname` label |
 | ServiceNow | Planned (later feature) | CMDB seeding of applications and services; not needed for v1 — declarations in git are the source |
 | Grafana 10.4+ | The datasource plugin | Enterprise supported |
 | Docker or Podman | Integration tests only | The test suite spins up throwaway Neo4j containers |
@@ -196,6 +198,18 @@ curl -s -H "$AUTH" "localhost:8080/impact?device=rtr-core-1&ifName=tengige0/1/2"
 ```
 
 (Seeding application stubs from ServiceNow — `promhash-seed` — is a planned later feature; v1 creates all application/service nodes from the YAML declarations themselves.)
+
+---
+
+## Demo
+
+A self-contained docker-compose stack under [`demo/`](demo/) runs the entire pipeline against a synthetic three-router topology: moving counters, a near-saturated trunk, and a flapping interface that exercises alert enrichment end to end — no real devices, no Nautobot.
+
+```bash
+cd demo && docker compose up -d --build
+```
+
+See [`demo/README.md`](demo/README.md) for the tour (what to look at on each port, and the flap cycle that demonstrates enriched alerts).
 
 ---
 
@@ -261,11 +275,14 @@ All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
 
 ### `promhash-catalog` — build the interface catalog
 
-Harvests the real interface inventory from Prometheus and binds it to device names from Nautobot, upserting `Interface` nodes that carry the actual metric labels and current `ifIndex`. This is the normalization layer that lets declarations use human interface names. Run it on a schedule.
+Harvests the real interface inventory from Prometheus, upserting `Interface` nodes that carry the actual metric labels and current `ifIndex`. This is the normalization layer that lets declarations use human interface names. Run it on a schedule.
+
+Device names come from the `-device-label` series label (default `hostname` — the label your `file_sd` target files stamp on every target). Precedence per interface: device label → optional Nautobot instance→device map → the raw `instance` value as a last resort. Nautobot is purely an optional naming fallback for environments whose targets carry no hostname-style label.
 
 ```
 -prometheus      Prometheus base URL                 (default http://localhost:9090)
--nautobot        Nautobot base URL                   (optional; enables device<->instance mapping)
+-device-label    series label carrying the device name  (default hostname; empty disables)
+-nautobot        Nautobot base URL                   (optional fallback; instance<->device mapping)
 -vendor          default vendor for name canonicalization  (default cisco)
 ```
 
