@@ -2,8 +2,11 @@
   "compilerOptions": {
     "target": "ES2019",
     "module": "ESNext",
-    "moduleResolution": "node",
-    "lib": ["ES2019", "DOM"],
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2019",
+      "DOM"
+    ],
     "jsx": "react",
     "strict": true,
     "esModuleInterop": true,
@@ -11,5 +14,8 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ]
 }

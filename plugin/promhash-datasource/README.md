@@ -18,23 +18,23 @@ datasource health check.
 
 ### Backend
 
-Build the backend executable into `dist/` (Grafana loads it as `gpx_promhash`):
+Grafana resolves the executable as `gpx_promhash_<GOOS>_<GOARCH>`, so build for the
+platform your Grafana server runs on:
 
 ```bash
-# via mage (preferred)
-mage
-
-# or directly
-go build -o dist/gpx_promhash ./pkg
+GOOS=linux GOARCH=amd64 go build -o dist/gpx_promhash_linux_amd64 ./pkg
+# (or `mage` to build the full platform matrix via the plugin SDK)
 ```
 
 ### Frontend
 
 ```bash
 npm install
-npm run build      # production webpack build into dist/
+npm run build      # webpack production build: dist/module.js + dist/plugin.json
 npx tsc --noEmit   # type-check only (smoke)
 ```
+
+`make dist-plugin` from the repo root runs both steps.
 
 ## Signing
 
@@ -56,6 +56,12 @@ Choose one:
 
 ## Deploy
 
-Deploy the built `dist/` directory (backend executable + frontend bundle + `plugin.json` +
-signature) via the existing GitOps pipeline that provisions Grafana plugins. Configure the
-data source with the promhash API URL after the plugin is loaded.
+There is no release pipeline; deployment is copying the built `dist/` directory to the
+Grafana server:
+
+1. `make dist-plugin` (repo root) — builds `dist/module.js`, `dist/plugin.json`, and the
+   linux backend binaries.
+2. Copy `dist/` to `<grafana-plugins-dir>/alectothefirst-promhash-datasource/` (default
+   plugins dir: `/var/lib/grafana/plugins`).
+3. Sign it, or allow it unsigned (see Signing above).
+4. Restart Grafana, add the data source, set the promhash API URL and the API token.
