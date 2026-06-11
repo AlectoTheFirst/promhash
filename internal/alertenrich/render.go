@@ -16,7 +16,12 @@ type RenderCfg struct {
 }
 
 // critRank orders criticality strings; higher wins. Unknown/empty rank as 0.
-var critRank = map[string]int{"critical": 4, "high": 3, "medium": 2, "low": 1}
+// Both common vocabularies are supported: severity words and the project's
+// documented free-form tier convention (tier-1 = most critical).
+var critRank = map[string]int{
+	"critical": 4, "high": 3, "medium": 2, "low": 1,
+	"tier-1": 4, "tier-2": 3, "tier-3": 2, "tier-4": 1,
+}
 
 // Render turns impact rows into the labels and annotations to attach to an alert.
 // Empty rows produce (nil, nil) so the alert passes through unchanged. When

@@ -67,3 +67,17 @@ func TestRenderNoCriticalityNoCustomer(t *testing.T) {
 		t.Fatalf("blast_radius: %q", annotations["promhash_blast_radius"])
 	}
 }
+
+// TestRenderTierCriticality: the project's documented criticality convention
+// is free-form tier-N (tier-1 highest); the max selection must rank it, not
+// fall through to "unknown".
+func TestRenderTierCriticality(t *testing.T) {
+	rows := []graph.ImpactRow{
+		{App: "checkout", Service: "checkout-api", Owner: "team-shop", Customer: "globex", Criticality: "tier-2"},
+		{App: "payments", Service: "payments-api", Owner: "team-payments", Criticality: "tier-1"},
+	}
+	labels, _ := Render(rows, RenderCfg{Prefix: "promhash_", EnrichLabels: true})
+	if labels["promhash_max_criticality"] != "tier-1" {
+		t.Fatalf("max_criticality = %q, want tier-1 (tier-1 outranks tier-2)", labels["promhash_max_criticality"])
+	}
+}

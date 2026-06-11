@@ -5,12 +5,15 @@ set -eu
 
 NEO="bolt://neo4j:7687"
 
-echo "init: waiting for demo series in main-prom..."
+# Wait for ALL 5 demo interfaces (2+2+1 across the three devices), not just
+# the first series — the devices' first scrapes are staggered, and a partial
+# catalog makes declaration validation fail.
+echo "init: waiting for all demo series in main-prom..."
 i=0
-until wget -qO- 'http://main-prom:9090/api/v1/query?query=ifHCInOctets' 2>/dev/null | grep -q '"hostname"'; do
+until wget -qO- 'http://main-prom:9090/api/v1/query?query=count(ifHCInOctets)' 2>/dev/null | grep -q ',"5"\]'; do
   i=$((i + 1))
   if [ "$i" -gt 60 ]; then
-    echo "init: timed out waiting for ifHCInOctets series" >&2
+    echo "init: timed out waiting for the full ifHCInOctets series set" >&2
     exit 1
   fi
   sleep 2
