@@ -93,6 +93,7 @@ func run() error {
 
 	var failed bool
 	present := make(map[string]bool)
+	declaredBy := make(map[string]string)
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -110,6 +111,11 @@ func run() error {
 			for _, e := range errs {
 				log.Printf("%s: %v", f, e)
 			}
+			failed = true
+			continue
+		}
+		if prevFile, dup := registerApp(declaredBy, a.App, f); dup {
+			log.Printf("%s: app %q already declared in %s (one declaration file per app)", f, a.App, prevFile)
 			failed = true
 			continue
 		}
@@ -139,6 +145,20 @@ func run() error {
 
 	log.Printf("processed %d declarations (validateOnly=%v)", len(files), validateOnly)
 	return nil
+}
+
+// registerApp records which file declares the app, keyed by the app's phash
+// (case/whitespace-insensitive, matching graph identity). It returns the
+// previously-registering file and true when another file in the batch already
+// declared the same app: two files declaring one app would silently
+// last-write-win in the graph, so the batch must fail loudly instead.
+func registerApp(seen map[string]string, app, file string) (prevFile string, dup bool) {
+	key := phash.Hash(phash.KindApp, app)
+	if prev, ok := seen[key]; ok {
+		return prev, true
+	}
+	seen[key] = file
+	return "", false
 }
 
 // appRetractor is the minimal seam needed by reconcileRetractions. *graph.Repo

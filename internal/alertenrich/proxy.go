@@ -40,6 +40,7 @@ type Proxy struct {
 	hc             *http.Client
 	now            func() time.Time
 	m              *metrics
+	cache          *lookupCache
 }
 
 // errAllUpstreams indicates no upstream Alertmanager accepted the batch.
@@ -69,6 +70,7 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		hc:             cfg.HTTPClient,
 		now:            cfg.Now,
 		m:              newMetrics(cfg.Registerer),
+		cache:          newLookupCache(cfg.Now),
 	}
 }
 
@@ -131,16 +133,27 @@ func (p *Proxy) enrichOne(ctx context.Context, a rawAlert) {
 	rows, lerr := p.lookup(lctx, key, at)
 	p.m.lookup.Observe(p.now().Sub(start).Seconds())
 	if lerr != nil {
-		reason := "error"
-		if errors.Is(lerr, context.DeadlineExceeded) {
-			reason = "timeout"
+		// A failed lookup falls back to the cached result of this alert's
+		// earlier successful lookup (same correlation key, same startsAt), so
+		// a resolved alert keeps the labels its firing notification got and
+		// the fingerprints stay identical. No cache entry → plain fail-open.
+		cached, hit := p.cache.get(key, at)
+		if !hit {
+			reason := "error"
+			if errors.Is(lerr, context.DeadlineExceeded) {
+				reason = "timeout"
+			}
+			p.m.passthrough.WithLabelValues(reason).Inc()
+			return
 		}
-		p.m.passthrough.WithLabelValues(reason).Inc()
-		return
+		rows = cached
 	}
 	if len(rows) == 0 {
 		p.m.passthrough.WithLabelValues("no_match").Inc()
 		return
+	}
+	if lerr == nil {
+		p.cache.put(key, at, rows)
 	}
 
 	outLabels, outAnnotations := Render(rows, p.render)

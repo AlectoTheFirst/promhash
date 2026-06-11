@@ -2,3 +2,5 @@
 *.out
 node_modules/
 plugin/promhash-datasource/dist/
+# root-level `go build ./cmd/...` outputs
+/promhash-*

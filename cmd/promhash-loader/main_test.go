@@ -34,6 +34,43 @@ func (f *fakeRetractor) CloseAppValidity(_ context.Context, appPHash string, at 
 }
 
 // ---------------------------------------------------------------------------
+// registerApp tests
+// ---------------------------------------------------------------------------
+
+func TestRegisterApp_FirstDeclarationAccepted(t *testing.T) {
+	seen := map[string]string{}
+	prev, dup := registerApp(seen, "payments", "declared/payments.yaml")
+	if dup {
+		t.Fatalf("first declaration flagged as duplicate (prev=%q)", prev)
+	}
+}
+
+func TestRegisterApp_DuplicateAcrossFilesDetected(t *testing.T) {
+	// Two files declaring the same app would silently last-write-win in the
+	// graph; the batch must fail instead and name both files.
+	seen := map[string]string{}
+	_, _ = registerApp(seen, "payments", "declared/payments.yaml")
+	prev, dup := registerApp(seen, "payments", "declared/payments-copy.yaml")
+	if !dup {
+		t.Fatal("second declaration of the same app not flagged as duplicate")
+	}
+	if prev != "declared/payments.yaml" {
+		t.Fatalf("prev file = %q, want declared/payments.yaml", prev)
+	}
+}
+
+func TestRegisterApp_IdentityIsCaseAndSpaceInsensitive(t *testing.T) {
+	// App identity is the phash (ToLower+TrimSpace), so "Payments " and
+	// "payments" are the SAME app and must collide.
+	seen := map[string]string{}
+	_, _ = registerApp(seen, "payments", "a.yaml")
+	_, dup := registerApp(seen, " Payments", "b.yaml")
+	if !dup {
+		t.Fatal("case/whitespace variant of the same app not flagged as duplicate")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // shouldReconcile tests
 // ---------------------------------------------------------------------------
 

@@ -66,6 +66,13 @@ func (r *Repo) EnsureConstraints(ctx context.Context) error {
 	if err := r.write(ctx, `CREATE CONSTRAINT app_name_unique IF NOT EXISTS FOR (a:Application) REQUIRE a.name IS UNIQUE`, nil); err != nil {
 		return err
 	}
+	// Composite index backing InterfaceImpactByInstanceIndex: the alert proxy
+	// resolves every correlatable alert by (instance, ifIndex), and without an
+	// index that MATCH is a full scan over Interface nodes — slow exactly
+	// during alert storms.
+	if err := r.write(ctx, `CREATE INDEX iface_instance_ifindex IF NOT EXISTS FOR (n:Interface) ON (n.instance, n.ifIndex)`, nil); err != nil {
+		return err
+	}
 	return nil
 }
 

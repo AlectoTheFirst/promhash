@@ -35,12 +35,16 @@ type alertGroupDoc struct {
 // The pipeline's signature failure mode is SILENT EMPTINESS: a mapping that
 // stops being ingested, a remote_write feed that stalls, or a join key that no
 // longer intersects the counters all result in rules that evaluate to nothing
-// while every process involved looks healthy. The first four alerts exist to
+// while every process involved looks healthy. The first five alerts exist to
 // turn each of those silent states into a page:
 //
 //   - PromhashMappingAbsent / PromhashMappingScrapeDown — the mapping series
 //     vanished (server down, scrape broken). Every path-health rule joins
 //     against it, so all app series stop within the staleness window.
+//   - PromhashCountersAbsent — the raw counters never arrived at all (cold
+//     start: remote_write misconfigured or never started). CountersStale
+//     cannot fire here because its timestamp() expression is empty when the
+//     metric is absent.
 //   - PromhashCountersStale — the raw-counter remote_write feed from the main
 //     Prometheus has stalled; rules evaluate at wall-clock "now" and go empty
 //     once the data lags past the rate window.
@@ -80,6 +84,18 @@ func pathHealthAlerts(jk JoinKey) []alertRule {
 			Annotations: map[string]string{
 				"summary":     "promhash mapping scrape target down",
 				"description": "The promhash-mapping scrape job cannot reach promhash-api. Once the mapping series go stale the path-health rules evaluate to nothing.",
+			},
+		},
+		{
+			Alert: "PromhashCountersAbsent",
+			Expr:  "absent(ifHCInOctets)",
+			For:   "5m",
+			Labels: map[string]string{
+				"severity": "critical",
+			},
+			Annotations: map[string]string{
+				"summary":     "no raw counters ingested — remote_write from the main Prometheus never arrived",
+				"description": "Not a single ifHCInOctets sample is present in the evaluator. PromhashCountersStale cannot fire in this state (its timestamp() expression is empty), so this covers the cold-start case: a misconfigured or never-started remote_write feed.",
 			},
 		},
 		{
@@ -140,6 +156,18 @@ func pathHealthAlerts(jk JoinKey) []alertRule {
 			Annotations: map[string]string{
 				"summary":     "{{ $labels.app }}: sustained interface errors on declared path",
 				"description": "Interfaces on the declared path of {{ $labels.app }}/{{ $labels.service }} have reported a non-zero error rate for 15 minutes (sum of in+out errors across hops: {{ $value }}/s).",
+			},
+		},
+		{
+			Alert: "PromhashPathDiscards",
+			Expr:  "app:path_discards:rate5m > 0",
+			For:   "15m",
+			Labels: map[string]string{
+				"severity": "warning",
+			},
+			Annotations: map[string]string{
+				"summary":     "{{ $labels.app }}: sustained interface discards on declared path",
+				"description": "Interfaces on the declared path of {{ $labels.app }}/{{ $labels.service }} have reported a non-zero discard rate for 15 minutes (sum of in+out discards across hops: {{ $value }}/s). Discards usually mean congestion or QoS drops rather than physical errors.",
 			},
 		},
 	}

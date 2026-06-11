@@ -68,6 +68,44 @@ func TestRenderNoCriticalityNoCustomer(t *testing.T) {
 	}
 }
 
+// TestRenderCriticalityCaseInsensitive: criticality is free-form business
+// metadata, so "Tier-1" must rank the same as "tier-1" instead of falling
+// through to "unknown" while the annotation shows the real value.
+func TestRenderCriticalityCaseInsensitive(t *testing.T) {
+	rows := []graph.ImpactRow{
+		{App: "payments", Service: "payments-api", Owner: "team-payments", Criticality: "Tier-1"},
+	}
+	labels, _ := Render(rows, RenderCfg{Prefix: "promhash_", EnrichLabels: true})
+	if labels["promhash_max_criticality"] != "Tier-1" {
+		t.Fatalf("max_criticality = %q, want Tier-1 (case-insensitive rank, original casing kept)", labels["promhash_max_criticality"])
+	}
+}
+
+// TestRenderPSchemeCriticality: P1–P4 is a common incident-priority vocabulary;
+// it must rank (P1 highest) rather than render as "unknown".
+func TestRenderPSchemeCriticality(t *testing.T) {
+	rows := []graph.ImpactRow{
+		{App: "checkout", Service: "checkout-api", Owner: "team-shop", Criticality: "P3"},
+		{App: "payments", Service: "payments-api", Owner: "team-payments", Criticality: "P1"},
+	}
+	labels, _ := Render(rows, RenderCfg{Prefix: "promhash_", EnrichLabels: true})
+	if labels["promhash_max_criticality"] != "P1" {
+		t.Fatalf("max_criticality = %q, want P1 (P1 outranks P3)", labels["promhash_max_criticality"])
+	}
+}
+
+// TestRenderSevSchemeCriticality: sev1–sev4 must rank (sev1 highest).
+func TestRenderSevSchemeCriticality(t *testing.T) {
+	rows := []graph.ImpactRow{
+		{App: "checkout", Service: "checkout-api", Owner: "team-shop", Criticality: "sev2"},
+		{App: "payments", Service: "payments-api", Owner: "team-payments", Criticality: "sev4"},
+	}
+	labels, _ := Render(rows, RenderCfg{Prefix: "promhash_", EnrichLabels: true})
+	if labels["promhash_max_criticality"] != "sev2" {
+		t.Fatalf("max_criticality = %q, want sev2 (sev2 outranks sev4)", labels["promhash_max_criticality"])
+	}
+}
+
 // TestRenderTierCriticality: the project's documented criticality convention
 // is free-form tier-N (tier-1 highest); the max selection must rank it, not
 // fall through to "unknown".

@@ -76,6 +76,44 @@ func TestAppNameUniqueConstraint(t *testing.T) {
 	}
 }
 
+// TestInterfaceInstanceIfIndexIndex verifies that EnsureConstraints creates the
+// composite index backing InterfaceImpactByInstanceIndex. Without it that
+// lookup — issued by the alert proxy for every correlatable alert — is a full
+// label scan over Interface nodes, which degrades enrichment to passthrough
+// timeouts on production-sized catalogs exactly during alert storms.
+func TestInterfaceInstanceIfIndexIndex(t *testing.T) {
+	ctx := context.Background()
+	drv, cleanup := testutil.Neo4j(t, ctx)
+	defer cleanup()
+	const dbName = "neo4j"
+	r := New(drv, dbName)
+
+	if err := r.EnsureConstraints(ctx); err != nil {
+		t.Fatalf("EnsureConstraints: %v", err)
+	}
+
+	res, err := neo4j.ExecuteQuery(ctx, drv,
+		`SHOW INDEXES YIELD name, labelsOrTypes, properties WHERE name = 'iface_instance_ifindex'`,
+		nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(dbName))
+	if err != nil {
+		t.Fatalf("SHOW INDEXES: %v", err)
+	}
+	if len(res.Records) != 1 {
+		t.Fatalf("want 1 index named 'iface_instance_ifindex', got %d records", len(res.Records))
+	}
+	rec := res.Records[0]
+	labelsRaw, _ := rec.Get("labelsOrTypes")
+	propsRaw, _ := rec.Get("properties")
+	labels, ok1 := labelsRaw.([]any)
+	props, ok2 := propsRaw.([]any)
+	if !ok1 || len(labels) != 1 || labels[0] != "Interface" {
+		t.Errorf("want labelsOrTypes=[Interface], got %v (ok=%v)", labelsRaw, ok1)
+	}
+	if !ok2 || len(props) != 2 || props[0] != "instance" || props[1] != "ifIndex" {
+		t.Errorf("want properties=[instance, ifIndex], got %v (ok=%v)", propsRaw, ok2)
+	}
+}
+
 func TestUpsertAndGetInterface(t *testing.T) {
 	ctx := context.Background()
 	drv, cleanup := testutil.Neo4j(t, ctx)

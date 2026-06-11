@@ -46,11 +46,13 @@ func TestPathHealthAlerts_Shape(t *testing.T) {
 	wantAlerts := []string{
 		"PromhashMappingAbsent",
 		"PromhashMappingScrapeDown",
+		"PromhashCountersAbsent",
 		"PromhashCountersStale",
 		"PromhashMappingDrift",
 		"PromhashPathHopDown",
 		"PromhashPathUtilizationHigh",
 		"PromhashPathErrors",
+		"PromhashPathDiscards",
 	}
 	if len(doc.Groups[0].Rules) != len(wantAlerts) {
 		t.Fatalf("got %d alerts, want %d", len(doc.Groups[0].Rules), len(wantAlerts))
@@ -66,6 +68,75 @@ func TestPathHealthAlerts_Shape(t *testing.T) {
 		if r.Annotations["summary"] == "" {
 			t.Errorf("alert %q missing summary annotation", r.Alert)
 		}
+	}
+}
+
+// TestPathHealthAlerts_CountersAbsentFiresOnColdStart: with NO ifHCInOctets
+// ever ingested (e.g. a misconfigured remote_write URL on day one), the
+// counters-absent expression must yield a result. PromhashCountersStale's
+// timestamp() expression evaluates to empty in that state, so without this
+// alert a never-started feed would only surface via the 30-minute warning
+// drift alert.
+func TestPathHealthAlerts_CountersAbsentFiresOnColdStart(t *testing.T) {
+	const load = `load 1m
+promhash_interface_app{app="payments", service="svc", device="rtr1", ifName="Te0/1", instance="10.0.0.1", direction="egress"} 1+0x6
+`
+	expr := alertExprFor(t, JoinByIfName, "PromhashCountersAbsent")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected counters-absent expr to yield 1 result on cold start, got %d: %v", len(vec), vec)
+	}
+	if got := vec[0].F; got != 1 {
+		t.Errorf("counters-absent value = %v, want 1", got)
+	}
+}
+
+// TestPathHealthAlerts_CountersAbsentQuietWhenCountersPresent: any ifHCInOctets
+// sample silences the absent() expression (staleness is PromhashCountersStale's
+// job, not this alert's).
+func TestPathHealthAlerts_CountersAbsentQuietWhenCountersPresent(t *testing.T) {
+	const load = `load 1m
+ifHCInOctets{instance="10.0.0.1", ifName="Te0/1"} 0+1000x6
+`
+	expr := alertExprFor(t, JoinByIfName, "PromhashCountersAbsent")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 0 {
+		t.Fatalf("expected no counters-absent result while counters flow, got %d: %v", len(vec), vec)
+	}
+}
+
+// TestPathHealthAlerts_CountersAbsentSeverity: cold-start silence is the
+// pipeline's signature failure mode, so the alert must page (critical).
+func TestPathHealthAlerts_CountersAbsentSeverity(t *testing.T) {
+	doc := unmarshalAlerts(t, JoinByIfName)
+	for _, r := range doc.Groups[0].Rules {
+		if r.Alert == "PromhashCountersAbsent" {
+			if r.Labels["severity"] != "critical" {
+				t.Errorf("PromhashCountersAbsent severity = %q, want critical", r.Labels["severity"])
+			}
+			return
+		}
+	}
+	t.Fatal("PromhashCountersAbsent not found")
+}
+
+// TestPathHealthAlerts_PathDiscardsFiresOnNonZeroRate: the discards rollup has
+// a recording rule, so it must also have the matching alert (mirroring
+// PromhashPathErrors).
+func TestPathHealthAlerts_PathDiscardsFiresOnNonZeroRate(t *testing.T) {
+	const load = `load 1m
+app:path_discards:rate5m{app="payments", service="svc"} 5+0x6
+`
+	expr := alertExprFor(t, JoinByIfName, "PromhashPathDiscards")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected discards expr to yield 1 result, got %d: %v", len(vec), vec)
+	}
+	if got := vec[0].F; got != 5 {
+		t.Errorf("discards value = %v, want 5", got)
 	}
 }
 

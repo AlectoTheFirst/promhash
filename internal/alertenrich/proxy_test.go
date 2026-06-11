@@ -175,6 +175,86 @@ func TestProxyBadJSON400(t *testing.T) {
 	}
 }
 
+// flakyClient serves rows until fail is set, then errors. Used to model the
+// promhash-api becoming unreachable between an alert firing and resolving.
+type flakyClient struct {
+	rows []graph.ImpactRow
+	fail bool
+}
+
+func (f *flakyClient) ImpactByInstanceIndex(_ context.Context, _ string, _ int, _ time.Time) ([]graph.ImpactRow, error) {
+	if f.fail {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return f.rows, nil
+}
+func (f *flakyClient) ImpactByName(_ context.Context, _, _ string, _ time.Time) ([]graph.ImpactRow, error) {
+	if f.fail {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return f.rows, nil
+}
+
+// TestProxyResolvedUsesCachedLookupWhenAPIDown: the firing alert was enriched,
+// so its resolved counterpart MUST carry the same derived labels even if the
+// impact lookup fails at resolve time — otherwise the fingerprints differ and
+// the alert clears only via Alertmanager's resolve_timeout. The proxy caches
+// successful lookups by (correlation key, startsAt) to keep that guarantee.
+func TestProxyResolvedUsesCachedLookupWhenAPIDown(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	client := &flakyClient{rows: twoRows()}
+	p := NewProxy(baseCfg(client, []string{am.URL}))
+
+	// Phase 1: firing alert, lookup succeeds, labels stamped.
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("firing: code %d", rec.Code)
+	}
+
+	// Phase 2: the SAME alert (same labels, same startsAt) resolves while the
+	// API is down.
+	client.fail = true
+	resolved := `[{"labels":{"alertname":"IfDown","instance":"10.0.0.1:161","ifIndex":"42"},
+"annotations":{"summary":"x"},"startsAt":"2026-06-03T10:00:00Z","endsAt":"2026-06-03T10:30:00Z",
+"generatorURL":"http://prom"}]`
+	rec = postAlerts(t, p, resolved)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolved: code %d", rec.Code)
+	}
+
+	var out []map[string]any
+	if err := json.Unmarshal(last, &out); err != nil {
+		t.Fatalf("forwarded body not JSON: %v (%s)", err, last)
+	}
+	labels := out[0]["labels"].(map[string]any)
+	if labels["promhash_app_count"] != "2" {
+		t.Fatalf("resolved alert lost derived labels on API failure (fingerprint mismatch): %+v", labels)
+	}
+}
+
+// TestProxyNoCacheForNeverEnrichedAlert: an alert whose FIRST lookup fails has
+// nothing cached and must pass through unchanged (plain fail-open).
+func TestProxyNoCacheForNeverEnrichedAlert(t *testing.T) {
+	var last []byte
+	am := captureAM(t, &last)
+	defer am.Close()
+
+	client := &flakyClient{rows: twoRows(), fail: true}
+	p := NewProxy(baseCfg(client, []string{am.URL}))
+	rec := postAlerts(t, p, firingBatch)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	var out []map[string]any
+	_ = json.Unmarshal(last, &out)
+	if _, found := out[0]["labels"].(map[string]any)["promhash_app_count"]; found {
+		t.Fatal("never-enriched alert must be forwarded unchanged on lookup failure")
+	}
+}
+
 // TestProxyResolvedKeepsLabelsDropsAnnotation asserts that for a resolved alert
 // with EnrichResolved=false the derived LABELS are still applied (fingerprint
 // match) but the impact ANNOTATION is omitted.

@@ -629,6 +629,67 @@ func TestImpactExactPrecedence(t *testing.T) {
 	}
 }
 
+// countingCatalogRepo counts ListAllInterfaces calls so tests can prove the
+// resolver is cached rather than rebuilt from a full catalog scan per request.
+type countingCatalogRepo struct {
+	fakeRepo
+	listCalls int
+}
+
+func (r *countingCatalogRepo) ListAllInterfaces(ctx context.Context) ([]graph.Iface, error) {
+	r.listCalls++
+	return r.fakeRepo.ListAllInterfaces(ctx)
+}
+
+// TestImpactResolverCachedWithinTTL: two name-based impact lookups in quick
+// succession must hit the catalog once. Rebuilding the resolver from a full
+// ListAllInterfaces scan per request (the old OPT-10 behavior) collapses under
+// alert-storm load.
+func TestImpactResolverCachedWithinTTL(t *testing.T) {
+	repo := &countingCatalogRepo{}
+	srv := NewServer(repo)
+	q := "?device=rtr-core-1&ifName=" + url.QueryEscape("Te0/1/2")
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: code %d body %s", i, rec.Code, rec.Body)
+		}
+	}
+	if repo.listCalls != 1 {
+		t.Fatalf("ListAllInterfaces called %d times for 2 requests, want 1 (cached resolver)", repo.listCalls)
+	}
+}
+
+// TestImpactResolverRefreshesAfterTTL: the cached resolver must expire so
+// interfaces added by a later catalog sync become resolvable without an API
+// restart. Ten minutes is far past any sane cache TTL.
+func TestImpactResolverRefreshesAfterTTL(t *testing.T) {
+	repo := &countingCatalogRepo{}
+	srv := NewServer(repo)
+	clock := time.Now()
+	srv.now = func() time.Time { return clock }
+	q := "?device=rtr-core-1&ifName=" + url.QueryEscape("Te0/1/2")
+
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request: code %d body %s", rec.Code, rec.Body)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+
+	rec = httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/impact"+q, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second request: code %d body %s", rec.Code, rec.Body)
+	}
+	if repo.listCalls != 2 {
+		t.Fatalf("ListAllInterfaces called %d times across the TTL boundary, want 2 (cache must expire)", repo.listCalls)
+	}
+}
+
 // TestMappingPromHandler: GET /mapping.prom renders the live exposition for
 // the apps named in the query param. fakeRepo serves the same single egress
 // hop for every app, so two apps yield two mapping rows on one interface

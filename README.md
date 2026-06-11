@@ -459,10 +459,10 @@ An expression wrapped in `sum(...)` or `count(...)` drops those labels and the a
 
 Enrichment lands in two places, deliberately split:
 
-- **Labels** carry only bounded, slow-changing scalars: `promhash_max_criticality`, `promhash_app_count`, `promhash_customer_impact`. Labels define the alert fingerprint and are routable, so Alertmanager can page differently on customer impact. The high-cardinality app set is never a label.
+- **Labels** carry only bounded, slow-changing scalars: `promhash_max_criticality`, `promhash_app_count`, `promhash_customer_impact`. Labels define the alert fingerprint and are routable, so Alertmanager can page differently on customer impact. The high-cardinality app set is never a label. `promhash_max_criticality` ranks the common vocabularies case-insensitively — `tier-1..4`, `P1..P4`, `sev1..4`, and `critical/high/medium/low` — and renders `unknown` for anything else (the annotation always shows the declared value verbatim).
 - **Annotations** carry the full list: `promhash_impact` (one line per affected app with service, owner, customer, criticality) and `promhash_blast_radius`. Annotations do not affect fingerprint or routing and are what notification templates render. In the Alertmanager list UI they are behind the "Info" button.
 
-Derived labels are applied to resolved alerts too, so the fingerprint matches and alerts clear correctly. Set `-enrich-labels=false` for annotations-only operation. The proxy is stateless (scale horizontally), forwards to every configured Alertmanager peer (success means at least one accepts), and exposes its own metrics at `/metrics`: `promhash_alert_proxy_alerts_received_total`, `..._enriched_total`, `..._passthrough_total{reason}`, `..._forward_errors_total`, `..._lookup_seconds`.
+Derived labels are applied to resolved alerts too, so the fingerprint matches and alerts clear correctly; a per-process best-effort cache of successful lookups keeps that guarantee even when the API is unreachable at resolve time. Set `-enrich-labels=false` for annotations-only operation. The proxy holds no durable state (scale horizontally; the cache is an optimization, not a correctness requirement), forwards to every configured Alertmanager peer (success means at least one accepts), and exposes its own metrics at `/metrics`: `promhash_alert_proxy_alerts_received_total`, `..._enriched_total`, `..._passthrough_total{reason}`, `..._forward_errors_total`, `..._lookup_seconds`.
 
 ---
 
@@ -577,11 +577,13 @@ app:path_alerts_firing:count = sum by(app, service)(app:if_alerts_firing:count)
 |-------|-----------|----------|
 | `PromhashMappingAbsent` | `promhash_interface_app` missing entirely (mapping file empty or never ingested); every path-health rule evaluates to nothing | critical |
 | `PromhashMappingScrapeDown` | the mapping scrape (promhash-api `/mapping.prom`) is down | critical |
+| `PromhashCountersAbsent` | no `ifHCInOctets` sample has ever been ingested; the `remote_write` feed from the main Prometheus never arrived (cold start / misconfiguration) | critical |
 | `PromhashCountersStale` | newest `ifHCInOctets` sample older than 5 minutes; the `remote_write` feed from the main Prometheus has stalled | critical |
 | `PromhashMappingDrift` | mapping rows whose join key matches no counter series for 30 minutes: an interface renamed, renumbered, or retired since the last enrich run | warning |
 | `PromhashPathHopDown` | `app:path_hops_down:count > 0` for 5 minutes (annotated with the ECMP caveat: a down hop may be a redundant candidate) | warning |
 | `PromhashPathUtilizationHigh` | `app:path_util_max:ratio > 0.9` for 15 minutes | warning |
 | `PromhashPathErrors` | non-zero path error rate for 15 minutes | warning |
+| `PromhashPathDiscards` | non-zero path discard rate for 15 minutes | warning |
 - **`evaluator.yaml`**: the promhash Prometheus config (`SharedEvaluatorConfig`). It scrapes the live mapping exposition from `promhash-api` with `honor_labels: true` (so the mapping's `instance`/`ifIndex`/`iface` identity labels survive; without this job the path-health rules join against a metric the evaluator never ingests and evaluate to nothing), passing the curated apps as the `apps` query parameter and reading the API token from an `authorization.credentials_file`, so no secret lands in the committed config. It loads both rule files and remote-writes once with `global.external_labels.tenant`. It contains no counters scrape job: the raw counters arrive via `remote_write` from the main Prometheus, and remote-written samples are never relabeled by the receiver, so the config carries no relabel configuration either.
 
 The main Prometheus needs exactly one block (the only change ever made to it), and the promhash Prometheus is started with `--web.enable-remote-write-receiver`:

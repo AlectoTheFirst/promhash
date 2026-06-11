@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -52,12 +53,23 @@ type Repo interface {
 type Server struct {
 	repo Repo
 	mux  *http.ServeMux
+
+	// now is the clock used for resolver-cache expiry; tests override it.
+	now func() time.Time
+
+	// resolverMu guards the cached catalog resolver. The refresh happens while
+	// the mutex is held, deliberately: concurrent requests during a refresh
+	// wait for the one in flight instead of issuing a thundering herd of
+	// ListAllInterfaces scans.
+	resolverMu  sync.Mutex
+	resolver    *catalog.Resolver
+	resolverExp time.Time
 }
 
 // NewServer constructs a Server backed by r and registers all API routes on
 // its multiplexer. Use Mux to obtain the handler for serving.
 func NewServer(r Repo) *Server {
-	s := &Server{repo: r, mux: http.NewServeMux()}
+	s := &Server{repo: r, mux: http.NewServeMux(), now: time.Now}
 	s.mux.HandleFunc("GET /apps", s.listApps)
 	s.mux.HandleFunc("GET /apps/{app}/path", s.appPath)
 	s.mux.HandleFunc("GET /apps/{app}/ifaces", s.appIfaces)
@@ -214,21 +226,46 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+// resolverTTL bounds how stale the cached catalog resolver may get. The
+// catalog itself is refreshed by scheduled promhash-catalog runs (typically
+// minutes apart), so a 30-second resolver cache is invisible to correctness
+// while collapsing per-request full scans to at most two per minute.
+const resolverTTL = 30 * time.Second
+
+// cachedResolver returns the catalog resolver, rebuilding it from a full
+// ListAllInterfaces scan only when the cache is empty or older than
+// resolverTTL. Errors are never cached: a failed refresh leaves the cache
+// unchanged so the next request retries.
+func (s *Server) cachedResolver(ctx context.Context) (*catalog.Resolver, error) {
+	s.resolverMu.Lock()
+	defer s.resolverMu.Unlock()
+	if s.resolver != nil && s.now().Before(s.resolverExp) {
+		return s.resolver, nil
+	}
+	ifaces, err := s.repo.ListAllInterfaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.resolver = catalog.NewResolver(ifaces)
+	s.resolverExp = s.now().Add(resolverTTL)
+	return s.resolver, nil
+}
+
 // lookupImpact resolves (device, ifName) to a canonical catalog interface and
 // returns its impact rows. Resolution uses catalog.Resolver so that natural
 // names (e.g. "Te0/1/2") map to the same canonical phash as the stored node
 // (e.g. "tengige0/1/2"). Caller must inspect the error type to distinguish
 // *catalog.NoMatchError, *catalog.AmbiguousError, and hard repo errors.
 //
-// TODO(OPT-10): this rebuilds the Resolver from a full ListAllInterfaces scan on
-// every request. Acceptable for v1 catalogs; cache the Resolver with a TTL in the
-// long-lived API process before this is on a hot path.
+// The resolver is cached (see cachedResolver) instead of rebuilt from a full
+// catalog scan per request, so name-based lookups stay cheap under alert-storm
+// load (OPT-10).
 func (s *Server) lookupImpact(ctx context.Context, device, ifName string, t time.Time) (rows []graph.ImpactRow, resolvedPHash string, err error) {
-	ifaces, err := s.repo.ListAllInterfaces(ctx)
+	res, err := s.cachedResolver(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	ifc, rerr := catalog.NewResolver(ifaces).Resolve(device, ifName)
+	ifc, rerr := res.Resolve(device, ifName)
 	if rerr != nil {
 		return nil, "", rerr
 	}

@@ -15,12 +15,17 @@ type RenderCfg struct {
 	EnrichLabels bool   // when false, no labels are produced (annotations only)
 }
 
-// critRank orders criticality strings; higher wins. Unknown/empty rank as 0.
-// Both common vocabularies are supported: severity words and the project's
-// documented free-form tier convention (tier-1 = most critical).
+// critRank orders criticality strings; higher wins. Lookup is on the
+// lowercased value (criticality is free-form, so "Tier-1" must rank like
+// "tier-1"); unknown vocabularies and empty rank as 0. The common
+// vocabularies are supported: severity words, the project's documented
+// free-form tier convention (tier-1 = most critical), incident priorities
+// (P1 = most critical), and sev levels (sev1 = most critical).
 var critRank = map[string]int{
 	"critical": 4, "high": 3, "medium": 2, "low": 1,
 	"tier-1": 4, "tier-2": 3, "tier-3": 2, "tier-4": 1,
+	"p1": 4, "p2": 3, "p3": 2, "p4": 1,
+	"sev1": 4, "sev2": 3, "sev3": 2, "sev4": 1,
 }
 
 // Render turns impact rows into the labels and annotations to attach to an alert.
@@ -49,7 +54,8 @@ func Render(rows []graph.ImpactRow, cfg RenderCfg) (labels, annotations map[stri
 		if r.Customer != "" {
 			customers[r.Customer] = struct{}{}
 		}
-		if rk := critRank[r.Criticality]; rk > maxRank {
+		// Rank case-insensitively but keep the declared casing in the label.
+		if rk := critRank[strings.ToLower(r.Criticality)]; rk > maxRank {
 			maxRank, maxCrit = rk, r.Criticality
 		}
 		line := fmt.Sprintf("- %s (%s) owner %s", r.App, r.Service, r.Owner)
