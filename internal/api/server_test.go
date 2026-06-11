@@ -42,6 +42,9 @@ func (fakeRepo) AppPath(_ context.Context, app string, _ time.Time) ([]graph.Hop
 func (fakeRepo) InterfaceImpact(_ context.Context, _ string, _ time.Time) ([]graph.ImpactRow, error) {
 	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
 }
+func (fakeRepo) InterfaceImpactByInstanceIndex(_ context.Context, _ string, _ int, _ time.Time) ([]graph.ImpactRow, error) {
+	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
+}
 func (fakeRepo) ListApps(_ context.Context) ([]string, error) { return []string{"payments"}, nil }
 func (fakeRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
 	return testIfaces(), nil
@@ -498,21 +501,21 @@ func TestAtParamBounds(t *testing.T) {
 	const validQ = "device=rtr-core-1&ifName=" + "tengige0%2F1%2F2"
 
 	tests := []struct {
-		name             string
-		at               string // empty means omit the param
-		wantCode         int
+		name              string
+		at                string // empty means omit the param
+		wantCode          int
 		wantRepoNotCalled bool
 	}{
 		{
-			name:             "negative timestamp rejected",
-			at:               "-1",
-			wantCode:         http.StatusBadRequest,
+			name:              "negative timestamp rejected",
+			at:                "-1",
+			wantCode:          http.StatusBadRequest,
 			wantRepoNotCalled: true,
 		},
 		{
-			name:             "far-future timestamp rejected",
-			at:               "99999999999999",
-			wantCode:         http.StatusBadRequest,
+			name:              "far-future timestamp rejected",
+			at:                "99999999999999",
+			wantCode:          http.StatusBadRequest,
 			wantRepoNotCalled: true,
 		},
 		{
@@ -572,5 +575,53 @@ func TestImpactWhitespaceOnlyDeviceRejected(t *testing.T) {
 	}
 	if repo.listAllInterfacesCalled {
 		t.Fatal("ListAllInterfaces was called — guard must short-circuit before repo access")
+	}
+}
+
+// TestImpactExactInstanceIndex verifies that when instance+ifIndex params are
+// present the handler uses the exact lookup and returns the wrapped shape.
+func TestImpactExactInstanceIndex(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/impact?instance=10.0.0.1:161&ifIndex=42", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body)
+	}
+	impact, ok := out["impact"].([]any)
+	if !ok || len(impact) != 1 {
+		t.Fatalf("expected impact array with 1 element, body %s", rec.Body)
+	}
+	if impact[0].(map[string]any)["app"] != "payments" {
+		t.Fatalf("body %s", rec.Body)
+	}
+}
+
+// TestImpactExactBadIfIndex verifies a non-integer ifIndex is rejected with 400.
+func TestImpactExactBadIfIndex(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/impact?instance=10.0.0.1&ifIndex=notanint", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body %s", rec.Code, rec.Body)
+	}
+}
+
+// TestImpactExactPrecedence verifies instance+ifIndex take precedence over
+// device+ifName when both are supplied (exact path is used).
+func TestImpactExactPrecedence(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/impact?instance=10.0.0.1&ifIndex=42&device=rtr-core-1&ifName=Zz9", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	// Zz9 would 404 on the fuzzy path; exact path returns 200, proving precedence.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected exact path 200, got %d body %s", rec.Code, rec.Body)
 	}
 }

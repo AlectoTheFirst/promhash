@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/AlectoTheFirst/promhash/internal/phash"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // declaredConfidence is the confidence stamped on relationships created from a
@@ -118,6 +118,11 @@ func (r *Repo) ListAllInterfaces(ctx context.Context) ([]Iface, error) {
 
 // ErrNotFound is returned by lookups when no matching node exists in the graph.
 var ErrNotFound = fmt.Errorf("graph: node not found")
+
+// ErrAmbiguousInterface is returned when more than one Interface node shares the
+// same (instance, ifIndex). The catalog should make this pair unique; if it ever
+// occurs the caller treats it as no match rather than guessing.
+var ErrAmbiguousInterface = fmt.Errorf("graph: multiple interfaces match instance+ifIndex")
 
 func ifaceFromProps(p map[string]any) Iface {
 	gs := func(k string) string {
@@ -441,6 +446,31 @@ func (r *Repo) InterfaceImpact(ctx context.Context, ifacePHash string, at time.T
 			Customer: gs("customer"), Criticality: gs("criticality")})
 	}
 	return out, nil
+}
+
+// InterfaceImpactByInstanceIndex resolves the Interface by exact (instance,
+// ifIndex) and returns its impact rows at time at, reusing the InterfaceImpact
+// traversal so impact logic lives in one place. Zero matches → (nil, nil): the
+// interface is simply not in the graph, which callers treat as "no impact".
+// More than one match → ErrAmbiguousInterface (should not happen).
+func (r *Repo) InterfaceImpactByInstanceIndex(ctx context.Context, instance string, ifIndex int, at time.Time) ([]ImpactRow, error) {
+	res, err := neo4j.ExecuteQuery(ctx, r.drv,
+		`MATCH (n:Interface {instance:$instance, ifIndex:$ifIndex}) RETURN n.phash AS phash`,
+		map[string]any{"instance": instance, "ifIndex": ifIndex},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
+	}
+	switch len(res.Records) {
+	case 0:
+		return nil, nil
+	case 1:
+		v, _ := res.Records[0].Get("phash")
+		p, _ := v.(string)
+		return r.InterfaceImpact(ctx, p, at)
+	default:
+		return nil, ErrAmbiguousInterface
+	}
 }
 
 // ListApps returns the names of all Application nodes, sorted alphabetically.

@@ -33,6 +33,9 @@ type Repo interface {
 	// InterfaceImpact returns the rows describing what is affected by the
 	// interface identified by its phash, as of the given time.
 	InterfaceImpact(ctx context.Context, ifacePHash string, at time.Time) ([]graph.ImpactRow, error)
+	// InterfaceImpactByInstanceIndex returns the rows affected by the interface
+	// identified by an exact (instance, ifIndex) pair, as of the given time.
+	InterfaceImpactByInstanceIndex(ctx context.Context, instance string, ifIndex int, at time.Time) ([]graph.ImpactRow, error)
 	// ListApps returns the identifiers of all known applications.
 	ListApps(ctx context.Context) ([]string, error)
 	// ListAllInterfaces returns every known interface, used by lookupImpact to
@@ -203,18 +206,47 @@ func writeImpact(w http.ResponseWriter, device, ifName string, rows []graph.Impa
 	writeJSON(w, map[string]any{"interface": device + "/" + ifName, "impact": rows})
 }
 
-// impact reports the blast radius of an interface given as device/ifName query
-// params. The ifName may be in any recognized form (canonical, metric, alias,
-// description); the catalog resolver maps it to a canonical phash server-side.
+// impact reports the blast radius of an interface. Two correlation modes:
+//   - exact: instance + ifIndex query params (preferred; used by the alert proxy)
+//   - fuzzy: device + ifName query params (the ifName may be any recognized form;
+//     the catalog resolver maps it to a canonical phash server-side)
+//
+// When both are supplied, the exact pair takes precedence.
 func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
-	device, ifName := r.URL.Query().Get("device"), r.URL.Query().Get("ifName")
-	if strings.TrimSpace(device) == "" || strings.TrimSpace(ifName) == "" {
-		http.Error(w, "device and ifName are required", http.StatusBadRequest)
-		return
-	}
+	q := r.URL.Query()
 	t, ok := at(r)
 	if !ok {
 		http.Error(w, "invalid at parameter", http.StatusBadRequest)
+		return
+	}
+
+	instance, ifIndexStr := strings.TrimSpace(q.Get("instance")), strings.TrimSpace(q.Get("ifIndex"))
+	if instance != "" && ifIndexStr != "" {
+		ifIndex, err := strconv.Atoi(ifIndexStr)
+		if err != nil {
+			http.Error(w, "ifIndex must be an integer", http.StatusBadRequest)
+			return
+		}
+		rows, err := s.repo.InterfaceImpactByInstanceIndex(r.Context(), instance, ifIndex, t)
+		if err != nil {
+			if errors.Is(err, graph.ErrAmbiguousInterface) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": "ambiguous interface reference", "instance": instance, "ifIndex": ifIndex})
+				return
+			}
+			log.Printf("api: InterfaceImpactByInstanceIndex: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeImpact(w, instance, ifIndexStr, rows)
+		return
+	}
+
+	device, ifName := strings.TrimSpace(q.Get("device")), strings.TrimSpace(q.Get("ifName"))
+	if device == "" || ifName == "" {
+		http.Error(w, "device and ifName (or instance and ifIndex) are required", http.StatusBadRequest)
 		return
 	}
 	rows, _, err := s.lookupImpact(r.Context(), device, ifName, t)
