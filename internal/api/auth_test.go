@@ -72,3 +72,15 @@ func TestWithAuthPanicsOnEmptyTokens(t *testing.T) {
 	}()
 	WithAuth(NewServer(fakeRepo{}).Mux(), nil)
 }
+
+// TestMappingPromIsAuthenticated: the mapping exposition is business topology
+// data, not an operational probe; it must sit behind the token like every
+// other data endpoint.
+func TestMappingPromIsAuthenticated(t *testing.T) {
+	if rec := get(t, authedServer(), "/mapping.prom?apps=payments", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", rec.Code)
+	}
+	if rec := get(t, authedServer(), "/mapping.prom?apps=payments", "token-one"); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with token, got %d", rec.Code)
+	}
+}

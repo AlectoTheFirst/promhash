@@ -184,3 +184,46 @@ func TestSharedEvaluatorConfig_NoLegacyJobs(t *testing.T) {
 		}
 	}
 }
+
+// Test 6: the curated app set is rendered as the mapping job's "apps" query
+// parameter, and the API token file as authorization.credentials_file. The
+// token itself must never appear in the config (it is committed to git).
+func TestSharedEvaluatorConfig_AppsParamAndTokenFile(t *testing.T) {
+	opts := evalCfgOpts()
+	opts.CuratedApps = []string{"checkout", "payments"}
+	opts.APITokenFile = "/etc/promhash/api-token"
+	doc := unmarshalEvalCfg(t, opts)
+
+	mapping := scrapeConfigs(t, doc)[0].(map[string]any)
+	params, ok := mapping["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("mapping job missing params: %v", mapping)
+	}
+	apps, _ := params["apps"].([]any)
+	if len(apps) != 1 || apps[0].(string) != "checkout,payments" {
+		t.Errorf("params.apps = %v, want [checkout,payments]", apps)
+	}
+
+	auth, ok := mapping["authorization"].(map[string]any)
+	if !ok {
+		t.Fatalf("mapping job missing authorization block: %v", mapping)
+	}
+	if cf, _ := auth["credentials_file"].(string); cf != "/etc/promhash/api-token" {
+		t.Errorf("credentials_file = %q", cf)
+	}
+	if _, found := auth["credentials"]; found {
+		t.Error("authorization must never carry inline credentials")
+	}
+}
+
+// Test 6b: no token file and no curated apps omit both optional blocks.
+func TestSharedEvaluatorConfig_OptionalBlocksOmitted(t *testing.T) {
+	doc := unmarshalEvalCfg(t, evalCfgOpts())
+	mapping := scrapeConfigs(t, doc)[0].(map[string]any)
+	if _, found := mapping["params"]; found {
+		t.Errorf("params should be omitted when CuratedApps is empty: %v", mapping["params"])
+	}
+	if _, found := mapping["authorization"]; found {
+		t.Errorf("authorization should be omitted when APITokenFile is empty: %v", mapping["authorization"])
+	}
+}

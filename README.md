@@ -59,17 +59,16 @@ flowchart TB
         catalog["promhash-catalog<br/>(scheduled)"] --> neo[("Neo4j graph<br/>apps, paths, provenance, time")]
         loader --> neo
         neo --> enrich["promhash-enrich<br/>(curated apps)"]
-        enrich --> artifacts["_shared/ artifacts:<br/>mapping.prom<br/>path-health.rules.yaml<br/>path-health.alerts.yaml<br/>evaluator.yaml"]
+        enrich --> artifacts["_shared/ artifacts:<br/>path-health.rules.yaml<br/>path-health.alerts.yaml<br/>evaluator.yaml"]
     end
 
     mainprom -- "harvest interface +<br/>hostname labels" --> catalog
 
     subgraph projection["Metric projection (curated apps only)"]
-        mapping["mapping server"] -- "scrape mapping.prom" --> pprom["promhash Prometheus<br/>(remote-write receiver,<br/>evaluates the rules)"]
+        pprom["promhash Prometheus<br/>(remote-write receiver,<br/>evaluates the rules)"]
         pprom -- "remote_write app:* series<br/>(tenant label)" --> lts[("Long-term storage")]
     end
 
-    artifacts --> mapping
     artifacts --> pprom
     mainprom -- "remote_write raw<br/>if* counters + ALERTS" --> pprom
 
@@ -81,6 +80,7 @@ flowchart TB
     end
 
     neo --> api
+    api -- "scrape GET /mapping.prom<br/>(live mapping series)" --> pprom
     api --> plugin
     api --> proxy
     mainprom -- "firing alerts" --> proxy
@@ -93,14 +93,14 @@ The lifecycle, in order:
 2. **Declare.** Engineers describe an application's network path as YAML in git. A pull request triggers `promhash-loader -validate-only`, which resolves every device/interface reference against the catalog. Typos fail the PR.
 3. **Load.** On merge, `promhash-loader` writes the declaration into the graph with the commit SHA as provenance, closing the previous validity interval and opening a new one.
 4. **Query.** `promhash-api` answers path, interface, and impact questions for every application at zero Prometheus cost. The Grafana plugin and the alert proxy are its consumers.
-5. **Enrich.** For the curated application set, `promhash-enrich` generates four GitOps artifacts under `_shared/`: the bounded mapping series, the recording rules, the alerting rules, and the promhash Prometheus config.
-6. **Project.** The main Prometheus remote-writes the raw `if*` counters (and `ALERTS`) to a dedicated promhash Prometheus, which scrapes the mapping series and evaluates the path-health rules once for all curated apps.
+5. **Enrich.** For the curated application set, `promhash-enrich` generates three GitOps artifacts under `_shared/`: the recording rules, the alerting rules, and the promhash Prometheus config. The mapping series itself is not a file; it is served live by `promhash-api` (see step 6), so only reviewable configuration travels through GitOps.
+6. **Project.** The main Prometheus remote-writes the raw `if*` counters (and `ALERTS`) to a dedicated promhash Prometheus, which scrapes the bounded mapping series live from `promhash-api` and evaluates the path-health rules once for all curated apps.
 7. **Serve.** The resulting `app:if_*` and `app:path_*` series are remote-written onward to long-term storage with a `tenant` label, ready for `sum by(app)`, SLOs, and alerting.
 
 Two layers sit on top of the graph:
 
 1. **The graph (always on).** Identity-resolved nodes for applications, services, customers, devices, interfaces and IPs, joined by directional connections and ordered paths. Every fact carries provenance and a validity interval. This answers impact and path queries for every application, including the parts of the network with no flow coverage.
-2. **Per-application projection (opt-in, curated).** For applications that need real metrics (`sum by(app)`, SLOs, alerting), the enrichment generator emits the four shared GitOps artifacts described above. The main Prometheus stays untouched apart from one `remote_write` block.
+2. **Per-application projection (opt-in, curated).** For applications that need real metrics (`sum by(app)`, SLOs, alerting), the enrichment generator emits the three shared GitOps artifacts described above, and the bounded mapping series is scraped live from the API. The main Prometheus stays untouched apart from one `remote_write` block.
 
 The heavy infrastructure metrics keep their existing, bounded cardinality. Application context is either a graph lookup (free) or a small, intentional set of derived series.
 
@@ -162,7 +162,8 @@ export NEO4J_PASS=changeme
 #    Prometheus receives the raw counters via remote_write from the main
 #    Prometheus (see "Enrichment and projection").
 ./promhash-enrich -neo4j $NEO -apps payments -out ./gitops/enrichment \
-  -mapping-target mapping-server:8080 \
+  -promhash-api promhash-api:8080 \
+  -api-token-file /etc/promhash/api-token \
   -remote-write-url http://mimir:9090/api/v1/push \
   -tenant-label prod
 
@@ -333,13 +334,16 @@ Reads every `*.yaml` in a directory, resolves interface references, and loads th
 
 ### `promhash-enrich`: generate GitOps artifacts for curated apps
 
-For each named application, traverses the graph, resolves current `ifIndex`/`instance`, and writes the four projection artifacts under `-out/_shared/`: `mapping.prom`, `path-health.rules.yaml`, `path-health.alerts.yaml`, and `evaluator.yaml` (see [Enrichment and projection](#enrichment-and-projection)).
+For each named application, verifies a path exists in the graph and writes the three projection artifacts under `-out/_shared/`: `path-health.rules.yaml`, `path-health.alerts.yaml`, and `evaluator.yaml` (see [Enrichment and projection](#enrichment-and-projection)). The mapping series is not written as a file; the generated evaluator config scrapes it live from `promhash-api`, with the curated app set baked in as the scrape job's `apps` query parameter.
 
 ```
 -apps              comma-separated list of curated application names
 -out               output directory for artifacts  (default gitops/enrichment)
--mapping-target    host:port serving the rendered mapping.prom (required)
+-promhash-api      host:port of promhash-api serving GET /mapping.prom (required)
 -mapping-path      HTTP path of the mapping exposition  (default /mapping.prom)
+-api-token-file    path (on the promhash Prometheus host) of a file holding a
+                   Bearer token accepted by promhash-api; rendered as the
+                   scrape job's credentials_file, never inlined
 -remote-write-url  URL of the onward remote_write receiver / LTS (required)
 -tenant-label      value stamped as global.external_labels.tenant (required)
 -join-key          ifname (default) or composite; composite requires the
@@ -378,6 +382,7 @@ A small read-only surface over the graph, backed by Cypher. It is the single ser
 | `GET /apps` | List of application names. |
 | `GET /apps/{app}/path` | The application's path as an ordered list of hops. |
 | `GET /apps/{app}/ifaces` | Deduplicated composite `instance:ifIndex` selectors for the app's hops; the value list behind the zero-cardinality dashboard variable. |
+| `GET /mapping.prom?apps=` | The bounded mapping series as live Prometheus exposition text for the named curated apps; scraped by the promhash Prometheus. |
 | `GET /interface-apps?device=&ifName=` | Applications, services and customers that traverse an interface. |
 | `GET /impact?device=&ifName=&at=<unix>` | Blast radius for an interface, optionally at a point in time. Also accepts an exact `instance=&ifIndex=` pair (used by the alert proxy; takes precedence when both forms are supplied). |
 | `GET /healthz`, `GET /readyz` | Liveness; readiness (200 only when the graph store answers). |
@@ -508,9 +513,12 @@ promhash uses a shared-evaluator projection model. A single dedicated rule-evalu
 
 **T0: free graph lookups (Grafana variables).** The graph answers path and impact queries for every application at zero Prometheus cost. The `path_interfaces/<app>` variable query returns the composite `iface` value (`instance:ifIndex`) for each hop; this drives the zero-cardinality dashboard pattern.
 
-**T1: bounded mapping series + path-health recording rules (the primary layer).** `promhash-enrich` emits four shared artifacts under `_shared/`:
+**T1: bounded mapping series + path-health recording rules (the primary layer).**
 
-- **`mapping.prom`**: Prometheus exposition text for `promhash_interface_app{app,service,device,ifName,instance,ifIndex,iface,direction}=1`. One line per (interface, app, direction) pair; bounded by the curated set.
+The mapping series is served live by `promhash-api` at `GET /mapping.prom?apps=<curated>`: Prometheus exposition text for `promhash_interface_app{app,service,device,ifName,instance,ifIndex,iface,direction}=1`, one line per (interface, app, direction) pair, bounded by the curated set. It is generated data, rendered straight from the graph on every scrape, so it is always as fresh as the last catalog sync and never travels through GitOps as a committed file. The curated set stays an enrich-time decision: it is baked into the generated scrape job's `apps` parameter, not inferred from the graph.
+
+`promhash-enrich` emits three shared configuration artifacts under `_shared/`:
+
 - **`path-health.rules.yaml`**: a static, app-independent recording-rule group (`promhash_path_health`) that joins the raw counter firehose against the mapping series using `group_right()`. The counter series is the LEFT ("one") operand; the mapping series is the RIGHT ("many") operand, because a shared physical interface maps to multiple apps. A single physical interface fans out to one result series per mapped app. The per-hop rules (shown with the `ifname` join key, `on(instance, ifName)`; the `composite` key joins `on(iface)` instead):
 
 ```promql
@@ -568,13 +576,13 @@ app:path_alerts_firing:count = sum by(app, service)(app:if_alerts_firing:count)
 | Alert | Condition | Severity |
 |-------|-----------|----------|
 | `PromhashMappingAbsent` | `promhash_interface_app` missing entirely (mapping file empty or never ingested); every path-health rule evaluates to nothing | critical |
-| `PromhashMappingScrapeDown` | the mapping scrape target is down | critical |
+| `PromhashMappingScrapeDown` | the mapping scrape (promhash-api `/mapping.prom`) is down | critical |
 | `PromhashCountersStale` | newest `ifHCInOctets` sample older than 5 minutes; the `remote_write` feed from the main Prometheus has stalled | critical |
 | `PromhashMappingDrift` | mapping rows whose join key matches no counter series for 30 minutes: an interface renamed, renumbered, or retired since the last enrich run | warning |
 | `PromhashPathHopDown` | `app:path_hops_down:count > 0` for 5 minutes (annotated with the ECMP caveat: a down hop may be a redundant candidate) | warning |
 | `PromhashPathUtilizationHigh` | `app:path_util_max:ratio > 0.9` for 15 minutes | warning |
 | `PromhashPathErrors` | non-zero path error rate for 15 minutes | warning |
-- **`evaluator.yaml`**: the promhash Prometheus config (`SharedEvaluatorConfig`). It scrapes the served `mapping.prom` with `honor_labels: true` (so the mapping's `instance`/`ifIndex`/`iface` identity labels survive; without this job the path-health rules join against a metric the evaluator never ingests and evaluate to nothing), loads both rule files, and remote-writes once with `global.external_labels.tenant`. It contains no counters scrape job: the raw counters arrive via `remote_write` from the main Prometheus, and remote-written samples are never relabeled by the receiver, so the config carries no relabel configuration either.
+- **`evaluator.yaml`**: the promhash Prometheus config (`SharedEvaluatorConfig`). It scrapes the live mapping exposition from `promhash-api` with `honor_labels: true` (so the mapping's `instance`/`ifIndex`/`iface` identity labels survive; without this job the path-health rules join against a metric the evaluator never ingests and evaluate to nothing), passing the curated apps as the `apps` query parameter and reading the API token from an `authorization.credentials_file`, so no secret lands in the committed config. It loads both rule files and remote-writes once with `global.external_labels.tenant`. It contains no counters scrape job: the raw counters arrive via `remote_write` from the main Prometheus, and remote-written samples are never relabeled by the receiver, so the config carries no relabel configuration either.
 
 The main Prometheus needs exactly one block (the only change ever made to it), and the promhash Prometheus is started with `--web.enable-remote-write-receiver`:
 
@@ -713,4 +721,5 @@ The data model is built to absorb these without a rewrite:
 - **Nautobot as monitoring source of truth.** Generate the `file_sd` target files (with their `hostname`/`ip` labels) from Nautobot via its GraphQL API; the catalog keeps reading whatever Prometheus serves, so this requires no promhash changes.
 - **Quantitative attribution (Layer 2).** Ingest flow records (NetFlow/IPFIX from the core, firewall byte counts at boundaries) to split interface traffic across applications by share, and to fill in which candidate path was actually active and with what weight, written back as a `flow`-provenance overlay.
 - **Automated path discovery.** Derive path edges from observed flow and from modeled topology/routing, alongside the declared edges, each with its own provenance.
+- **AI-assisted declaration repair.** An agent that checks the declared `hop.if` references against the live Prometheus labels and proposes the correct interfaces (for example as PR suggestions) when validation fails or drift is detected, instead of only rejecting the declaration.
 - **Chargeback and per-customer views** once quantitative attribution exists.

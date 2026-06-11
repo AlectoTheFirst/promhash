@@ -35,8 +35,13 @@ promhash-loader -dir /demo/declared -neo4j "$NEO" -validate-only
 promhash-loader -dir /demo/declared -neo4j "$NEO" -source demo
 
 echo "init: generating projection artifacts..."
+# The mapping series is served live by promhash-api; the evaluator scrape
+# job reads its token from a file on the shared volume (never from the
+# generated config itself).
+printf 'demo-token' > /artifacts/api-token
 promhash-enrich -neo4j "$NEO" -apps payments,checkout -out /artifacts \
-  -mapping-target mapping:80 \
+  -promhash-api api:8080 \
+  -api-token-file /artifacts/api-token \
   -remote-write-url http://lts-prom:9090/api/v1/write \
   -tenant-label demo
 

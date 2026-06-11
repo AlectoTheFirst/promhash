@@ -28,8 +28,8 @@ Prometheus, and no exporter is ever scraped twice.
                                    │ remote_write (raw if* counters + ALERTS,
                                    │ optionally scoped by write_relabel_configs)
                                    ▼
-  mapping server ── scrape ──► promhash Prometheus        ← evaluator.yaml
-  (serves mapping.prom)          started with --web.enable-remote-write-receiver
+  promhash-api ── scrape ────► promhash Prometheus        ← evaluator.yaml
+  (live GET /mapping.prom)       started with --web.enable-remote-write-receiver
                                  loads: path-health.rules.yaml      (recording)
                                         path-health.alerts.yaml     (alerting)
                                  joins: counters × mapping on(instance, ifName)
@@ -51,11 +51,10 @@ TSDB without scraping anything twice.
 
 ## Artifacts emitted by `promhash-enrich`
 
-`promhash-enrich` writes four files under `_shared/`:
+`promhash-enrich` writes three files under `_shared/`:
 
 | File | Description |
 |------|-------------|
-| `_shared/mapping.prom` | Prometheus exposition text for `promhash_interface_app{…}=1`. One sample per (interface, app, direction) pair. |
 | `_shared/path-health.rules.yaml` | The static `promhash_path_health` recording-rule group. App-independent; evaluated once for all apps. |
 | `_shared/path-health.alerts.yaml` | The `promhash_path_health_alerts` alerting-rule group: pipeline meta-alerts + path alerts (see below). |
 | `_shared/evaluator.yaml` | The promhash Prometheus config shell (`SharedEvaluatorConfig`). |
@@ -84,8 +83,12 @@ And, via its own scrape: `promhash_interface_app` (the mapping).
 
 ## The mapping series
 
-`mapping.prom` contains `promhash_interface_app` samples with the full identity
-label set:
+The mapping is NOT a generated file: promhash-api serves it live at
+`GET /mapping.prom?apps=<curated>`, rendered from the graph on every scrape.
+It is always as fresh as the last catalog sync, and no generated data has to
+travel through the GitOps pipeline (only the three reviewable config files
+do). The exposition contains `promhash_interface_app` samples with the full
+identity label set:
 
 ```
 promhash_interface_app{app="payments",service="payments-api",device="rtr-core-1",
@@ -142,10 +145,10 @@ emptiness (everything runs, rules match nothing); each silent state pages:
 
 | Alert | Fires when |
 |-------|-----------|
-| `PromhashMappingAbsent` | `promhash_interface_app` missing entirely (mapping file empty / never ingested). |
+| `PromhashMappingAbsent` | `promhash_interface_app` missing entirely (mapping endpoint empty / never ingested). |
 | `PromhashMappingScrapeDown` | the mapping scrape target is down. |
 | `PromhashCountersStale` | newest `ifHCInOctets` sample older than 5 minutes — the remote_write feed from the main Prometheus stalled. |
-| `PromhashMappingDrift` | mapping rows whose join key matches no counter series — interface renamed/renumbered/retired since the last enrich run. Re-run `promhash-catalog` + `promhash-enrich`. |
+| `PromhashMappingDrift` | mapping rows whose join key matches no counter series — interface renamed/renumbered/retired since the last catalog sync. Re-run `promhash-catalog`. |
 
 **Path alerts** — `PromhashPathHopDown` (annotated with the ECMP caveat: a
 down hop may be a redundant candidate — redundancy lost, not necessarily an
@@ -172,8 +175,13 @@ scrape_configs:
   - job_name: promhash-mapping
     honor_labels: true               # REQUIRED — see below
     metrics_path: /mapping.prom      # -mapping-path (default /mapping.prom)
+    params:
+      apps: ["payments,checkout"]    # the curated set (-apps)
+    authorization:
+      credentials_file: <path>       # -api-token-file; the token itself never
+                                     # appears in this committed file
     static_configs:
-      - targets: [<mapping-server-host:port>]   # -mapping-target
+      - targets: [<promhash-api-host:port>]     # -promhash-api
 
 remote_write:
   - url: <remote-write-url>          # onward, to long-term storage
@@ -185,9 +193,9 @@ samples.
 
 `honor_labels: true` on the mapping job is mandatory: the mapping exposition
 carries the *devices'* `instance`/`ifIndex`/`iface` identity labels, and
-without it Prometheus would rewrite `instance` to the mapping server's address
-(moving the original to `exported_instance`), breaking the join and
-mislabeling every `group_right()` result.
+without it Prometheus would rewrite `instance` to the API's address (moving
+the original to `exported_instance`), breaking the join and mislabeling every
+`group_right()` result.
 
 ---
 
@@ -254,22 +262,24 @@ and the drift alert. Changing it requires regenerating and redeploying the
 
 ## Deploying
 
-1. Run `promhash-enrich` with `-mapping-target`, `-remote-write-url` and
-   `-tenant-label` (join key defaults to `ifname`) to generate the
-   `_shared/` artifacts.
-2. Serve `_shared/mapping.prom` over HTTP at the address given as
-   `-mapping-target` (any static file server works — nginx, a GitOps
-   sidecar).
-3. Copy `_shared/path-health.rules.yaml`, `_shared/path-health.alerts.yaml`
-   and `_shared/evaluator.yaml` to the promhash Prometheus config directory.
-4. Start the promhash Prometheus with `--config.file=evaluator.yaml
+1. Run `promhash-enrich` with `-promhash-api`, `-api-token-file`,
+   `-remote-write-url` and `-tenant-label` (join key defaults to `ifname`)
+   to generate the `_shared/` artifacts.
+2. Copy `_shared/path-health.rules.yaml`, `_shared/path-health.alerts.yaml`
+   and `_shared/evaluator.yaml` to the promhash Prometheus config directory,
+   and place a file holding a valid API token at the `-api-token-file` path
+   on that host (mount it as a secret; it is not part of the artifacts).
+3. Start the promhash Prometheus with `--config.file=evaluator.yaml
    --web.enable-remote-write-receiver`.
-5. Add the `remote_write` block above to the main Prometheus and reload it.
-6. Confirm, in order: `promhash_interface_app` series present (mapping job
-   up); `ifHCInOctets` present and fresh (remote_write feed flowing);
-   `app:if_egress_octets:rate5m` present (the join matches); series arriving
-   in long-term storage. The meta-alerts watch each of these from then on.
+4. Add the `remote_write` block above to the main Prometheus and reload it.
+5. Confirm, in order: `promhash_interface_app` series present (the mapping
+   scrape against promhash-api works); `ifHCInOctets` present and fresh
+   (remote_write feed flowing); `app:if_egress_octets:rate5m` present (the
+   join matches); series arriving in long-term storage. The meta-alerts
+   watch each of these from then on.
 
 Regenerate and redeploy the `_shared/` artifacts whenever the curated app set
-or any declared path changes, and after interface renames/renumbers
-(`PromhashMappingDrift` tells you when this has been missed).
+changes. Declared-path edits and interface renames/renumbers no longer need a
+redeploy: the mapping is served live from the graph, so the next catalog sync
+plus mapping scrape picks them up (`PromhashMappingDrift` still flags any
+window where the catalog itself is stale).

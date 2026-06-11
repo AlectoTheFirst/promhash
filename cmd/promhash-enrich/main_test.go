@@ -6,9 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	io_prometheus_client "github.com/prometheus/client_model/go"
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 	"gopkg.in/yaml.v3"
 
 	"github.com/AlectoTheFirst/promhash/internal/enrich"
@@ -26,7 +23,6 @@ func testOpts() enrich.EvaluatorOpts {
 
 // allSharedArtifacts is the complete expected file set under _shared/.
 var allSharedArtifacts = []string{
-	"mapping.prom",
 	"path-health.rules.yaml",
 	"path-health.alerts.yaml",
 	"evaluator.yaml",
@@ -59,9 +55,8 @@ func buildTwoAppInput() (apps map[string][]graph.Hop, svcNames map[string]string
 // Test 1: writeSharedArtifacts writes all four files under tmp/_shared/.
 func TestWriteSharedArtifacts_AllFilesExist(t *testing.T) {
 	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
+	if err := writeSharedArtifacts(tmp, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -73,99 +68,12 @@ func TestWriteSharedArtifacts_AllFilesExist(t *testing.T) {
 	}
 }
 
-// Test 2: mapping.prom parses as valid Prometheus exposition text; for the
-// shared iface there are exactly 2 series (one per app) per direction,
-// differing only in the app label.
-func TestWriteSharedArtifacts_MappingSharedHopTwoSeries(t *testing.T) {
-	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
-
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
-		t.Fatalf("writeSharedArtifacts: %v", err)
-	}
-
-	raw, err := os.ReadFile(filepath.Join(tmp, "_shared", "mapping.prom"))
-	if err != nil {
-		t.Fatalf("read mapping.prom: %v", err)
-	}
-
-	parser := expfmt.NewTextParser(model.LegacyValidation)
-	mf, err := parser.TextToMetricFamilies(strings.NewReader(string(raw)))
-	if err != nil {
-		t.Fatalf("parse mapping.prom: %v\ncontent:\n%s", err, raw)
-	}
-
-	family, ok := mf["promhash_interface_app"]
-	if !ok {
-		t.Fatalf("metric family promhash_interface_app not found; got: %v\ncontent:\n%s", mfNames(mf), raw)
-	}
-
-	// Collect metrics for the shared iface "10.0.0.1:7".
-	var forIface []*io_prometheus_client.Metric
-	for _, m := range family.Metric {
-		lm := labelPairMap(m.Label)
-		if lm["iface"] == "10.0.0.1:7" {
-			forIface = append(forIface, m)
-		}
-	}
-
-	// transit expands to ingress+egress per app → 4 total for this iface.
-	// The task says "shared hop → 2 series" but that's per-direction.
-	// For ingress: 2 series (payments + ledger). Same for egress.
-	// Collect just ingress and verify exactly 2 apps.
-	var ingressSeries []*io_prometheus_client.Metric
-	for _, m := range forIface {
-		lm := labelPairMap(m.Label)
-		if lm["direction"] == "ingress" {
-			ingressSeries = append(ingressSeries, m)
-		}
-	}
-
-	if len(ingressSeries) != 2 {
-		t.Fatalf("expected 2 ingress series for shared iface, got %d\ncontent:\n%s", len(ingressSeries), raw)
-	}
-
-	// They should have app=payments and app=ledger.
-	appSet := map[string]struct{}{}
-	for _, m := range ingressSeries {
-		lm := labelPairMap(m.Label)
-		appSet[lm["app"]] = struct{}{}
-		// Each value must be 1.
-		if v := m.GetUntyped().GetValue(); v != 1.0 {
-			t.Errorf("metric value = %v, want 1", v)
-		}
-	}
-	if _, ok := appSet["payments"]; !ok {
-		t.Errorf("missing app=payments in ingress series; got apps: %v", appSet)
-	}
-	if _, ok := appSet["ledger"]; !ok {
-		t.Errorf("missing app=ledger in ingress series; got apps: %v", appSet)
-	}
-
-	// Verify non-app labels are identical across the two ingress series.
-	var labelsA, labelsB map[string]string
-	for _, m := range ingressSeries {
-		lm := labelPairMap(m.Label)
-		if lm["app"] == "payments" {
-			labelsA = lm
-		} else {
-			labelsB = lm
-		}
-	}
-	for _, k := range []string{"iface", "instance", "ifIndex", "ifName", "device", "direction"} {
-		if labelsA[k] != labelsB[k] {
-			t.Errorf("label %q differs between apps: payments=%q ledger=%q", k, labelsA[k], labelsB[k])
-		}
-	}
-}
-
 // Test 3: path-health.rules.yaml unmarshals to a groups document with a
 // group named "promhash_path_health".
 func TestWriteSharedArtifacts_PathHealthRulesGroup(t *testing.T) {
 	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
+	if err := writeSharedArtifacts(tmp, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -195,10 +103,9 @@ func TestWriteSharedArtifacts_PathHealthRulesGroup(t *testing.T) {
 // opts.TenantLabel.
 func TestWriteSharedArtifacts_EvaluatorYAML(t *testing.T) {
 	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
 	opts := testOpts()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, opts); err != nil {
+	if err := writeSharedArtifacts(tmp, enrich.JoinByComposite, opts); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -234,9 +141,9 @@ func TestWriteSharedArtifacts_EvaluatorYAML(t *testing.T) {
 // Test 5: no per-app federate.match files are written.
 func TestWriteSharedArtifacts_NoPerAppFederateMatch(t *testing.T) {
 	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
+	apps, _ := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
+	if err := writeSharedArtifacts(tmp, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -251,10 +158,10 @@ func TestWriteSharedArtifacts_NoPerAppFederateMatch(t *testing.T) {
 // Test 6: -prune-legacy removes legacy per-app files while leaving _shared/ intact.
 func TestPruneLegacyArtifacts(t *testing.T) {
 	tmp := t.TempDir()
-	apps, svcNames := buildTwoAppInput()
+	apps, _ := buildTwoAppInput()
 
 	// First write the shared artifacts so _shared/ exists.
-	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
+	if err := writeSharedArtifacts(tmp, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -331,7 +238,7 @@ func TestPruneLegacyArtifacts_RejectsTraversalAppName(t *testing.T) {
 // Test 8: validateRequiredFlags rejects empty/blank required flags and names
 // every missing one; a fully-populated set passes.
 func TestValidateRequiredFlags(t *testing.T) {
-	if err := validateRequiredFlags("map:8443", "http://rw/push", "tenant-a"); err != nil {
+	if err := validateRequiredFlags("api:8080", "http://rw/push", "tenant-a"); err != nil {
 		t.Errorf("all flags set: unexpected error: %v", err)
 	}
 
@@ -339,7 +246,7 @@ func TestValidateRequiredFlags(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing flags, got nil")
 	}
-	for _, want := range []string{"-mapping-target", "-remote-write-url"} {
+	for _, want := range []string{"-promhash-api", "-remote-write-url"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should name %s; got: %v", want, err)
 		}
@@ -380,22 +287,4 @@ func TestParseJoinKey_KnownValues(t *testing.T) {
 			t.Errorf("parseJoinKey(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
-}
-
-// --- helpers ---
-
-func labelPairMap(pairs []*io_prometheus_client.LabelPair) map[string]string {
-	m := map[string]string{}
-	for _, p := range pairs {
-		m[p.GetName()] = p.GetValue()
-	}
-	return m
-}
-
-func mfNames[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

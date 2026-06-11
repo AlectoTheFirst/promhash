@@ -46,6 +46,9 @@ func (fakeRepo) InterfaceImpactByInstanceIndex(_ context.Context, _ string, _ in
 	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
 }
 func (fakeRepo) ListApps(_ context.Context) ([]string, error) { return []string{"payments"}, nil }
+func (fakeRepo) AppServiceName(_ context.Context, app string) (string, error) {
+	return app + "-api", nil
+}
 func (fakeRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
 	return testIfaces(), nil
 }
@@ -623,5 +626,59 @@ func TestImpactExactPrecedence(t *testing.T) {
 	// Zz9 would 404 on the fuzzy path; exact path returns 200, proving precedence.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected exact path 200, got %d body %s", rec.Code, rec.Body)
+	}
+}
+
+// TestMappingPromHandler: GET /mapping.prom renders the live exposition for
+// the apps named in the query param. fakeRepo serves the same single egress
+// hop for every app, so two apps yield two mapping rows on one interface
+// (the shared-link fan-out).
+func TestMappingPromHandler(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mapping.prom?apps=payments,ledger", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain exposition", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`promhash_interface_app{app="payments",service="payments-api"`,
+		`promhash_interface_app{app="ledger",service="ledger-api"`,
+		`direction="egress"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition missing %q:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "promhash_interface_app{"); got != 2 {
+		t.Errorf("expected 2 mapping rows (one per app), got %d:\n%s", got, body)
+	}
+}
+
+// TestMappingPromRequiresApps: the apps param is mandatory; the curated set is
+// an explicit enrich-time decision, never "everything in the graph".
+func TestMappingPromRequiresApps(t *testing.T) {
+	srv := NewServer(fakeRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mapping.prom", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without apps param, got %d", rec.Code)
+	}
+}
+
+// TestMappingPromSkipsPathlessApps: an app with no known path contributes no
+// rows rather than erroring the whole exposition.
+func TestMappingPromSkipsPathlessApps(t *testing.T) {
+	srv := NewServer(emptyPathRepo{})
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mapping.prom?apps=ghost", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "" {
+		t.Fatalf("expected empty exposition for pathless app, got %q", body)
 	}
 }

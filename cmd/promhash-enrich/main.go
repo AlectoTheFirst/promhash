@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,8 +28,9 @@ func run() error {
 	var (
 		neoURL, neoUser, neoPass string
 		outDir, allowlist        string
-		mappingTarget            string
+		apiTarget                string
 		mappingPath              string
+		apiTokenFile             string
 		remoteWriteURL           string
 		tenantLabel              string
 		joinKeyStr               string
@@ -39,8 +41,9 @@ func run() error {
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
 	flag.StringVar(&outDir, "out", "gitops/enrichment", "output dir for artifacts")
 	flag.StringVar(&allowlist, "apps", "", "comma-separated curated app names")
-	flag.StringVar(&mappingTarget, "mapping-target", "", "host:port serving the rendered mapping.prom for the evaluator's mapping scrape job")
-	flag.StringVar(&mappingPath, "mapping-path", "", "HTTP path of the mapping exposition on -mapping-target (default /mapping.prom)")
+	flag.StringVar(&apiTarget, "promhash-api", "", "host:port of the promhash-api serving the live GET /mapping.prom exposition")
+	flag.StringVar(&mappingPath, "mapping-path", "", "HTTP path of the mapping exposition on -promhash-api (default /mapping.prom)")
+	flag.StringVar(&apiTokenFile, "api-token-file", "", "path (on the promhash Prometheus host) of a file holding a Bearer token accepted by promhash-api; rendered as the scrape job's credentials_file")
 	flag.StringVar(&remoteWriteURL, "remote-write-url", "", "URL of the onward remote_write receiver (long-term storage)")
 	flag.StringVar(&tenantLabel, "tenant-label", "", "value stamped as global.external_labels.tenant")
 	flag.StringVar(&joinKeyStr, "join-key", "ifname", "join key for path-health rules: ifname (default) or composite (requires the counter-scraping Prometheus to synthesize the iface label)")
@@ -51,7 +54,7 @@ func run() error {
 		neoPass = os.Getenv("NEO4J_PASS")
 	}
 
-	if err := validateRequiredFlags(mappingTarget, remoteWriteURL, tenantLabel); err != nil {
+	if err := validateRequiredFlags(apiTarget, remoteWriteURL, tenantLabel); err != nil {
 		return err
 	}
 
@@ -72,7 +75,6 @@ func run() error {
 	r := graph.New(drv, "neo4j")
 
 	apps := make(map[string][]graph.Hop)
-	svcNames := make(map[string]string)
 
 	for _, app := range strings.Split(allowlist, ",") {
 		app = strings.TrimSpace(app)
@@ -87,20 +89,26 @@ func run() error {
 			log.Printf("WARN app %q has no known path; skipping", app)
 			continue
 		}
-		svc, _ := r.AppServiceName(ctx, app)
 		apps[app] = hops
-		svcNames[app] = svc
 		log.Printf("app %q: %d hops collected", app, len(hops))
 	}
 
+	curated := make([]string, 0, len(apps))
+	for app := range apps {
+		curated = append(curated, app)
+	}
+	sort.Strings(curated)
+
 	opts := enrich.EvaluatorOpts{
-		MappingTarget:      mappingTarget,
+		MappingTarget:      apiTarget,
 		MappingMetricsPath: mappingPath,
+		CuratedApps:        curated,
+		APITokenFile:       apiTokenFile,
 		RemoteWriteURL:     remoteWriteURL,
 		TenantLabel:        tenantLabel,
 	}
 
-	if err := writeSharedArtifacts(outDir, apps, svcNames, jk, opts); err != nil {
+	if err := writeSharedArtifacts(outDir, jk, opts); err != nil {
 		return err
 	}
 
@@ -116,12 +124,12 @@ func run() error {
 // validateRequiredFlags rejects an invocation missing any flag without which
 // the generated evaluator.yaml would be silently broken: no mapping ingestion
 // (rules join against nothing), no remote_write destination, or no tenant
-// identity. The raw counters need no flag — they arrive via remote_write from
+// identity. The raw counters need no flag; they arrive via remote_write from
 // the main Prometheus, configured out of band.
-func validateRequiredFlags(mappingTarget, remoteWriteURL, tenantLabel string) error {
+func validateRequiredFlags(apiTarget, remoteWriteURL, tenantLabel string) error {
 	var missing []string
 	for _, f := range []struct{ name, val string }{
-		{"-mapping-target", mappingTarget},
+		{"-promhash-api", apiTarget},
 		{"-remote-write-url", remoteWriteURL},
 		{"-tenant-label", tenantLabel},
 	} {
@@ -148,32 +156,23 @@ func parseJoinKey(s string) (enrich.JoinKey, error) {
 	}
 }
 
-// writeSharedArtifacts builds the combined mapping points for all apps and
-// writes the four shared artifacts under dir/_shared/:
+// writeSharedArtifacts writes the three shared configuration artifacts under
+// dir/_shared/:
 //
-//   - mapping.prom            — promhash_interface_app{…}=1 exposition text
 //   - path-health.rules.yaml  — static path-health recording-rule group
 //   - path-health.alerts.yaml — pipeline + path alerting rules
-//   - evaluator.yaml          — promhash Prometheus config shell (receiver mode)
+//   - evaluator.yaml          — promhash Prometheus config (receiver mode)
+//
+// The mapping series is NOT written as a file: it is generated data, served
+// live by promhash-api at GET /mapping.prom and scraped via the job that
+// evaluator.yaml carries. Only reviewable configuration travels through
+// GitOps.
 //
 // It does NOT require a live Neo4j; all inputs are pre-resolved by the caller.
-func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[string]string, jk enrich.JoinKey, opts enrich.EvaluatorOpts) error {
+func writeSharedArtifacts(dir string, jk enrich.JoinKey, opts enrich.EvaluatorOpts) error {
 	sharedDir := filepath.Join(dir, "_shared")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", sharedDir, err)
-	}
-
-	// Build combined mapping points across all apps.
-	var allPoints []enrich.MappingPoint
-	for app, hops := range apps {
-		svc := svcNames[app]
-		pts := enrich.MappingSeries(app, svc, hops, jk)
-		allPoints = append(allPoints, pts...)
-	}
-
-	mappingText := enrich.RenderMappingSeries(allPoints)
-	if err := os.WriteFile(filepath.Join(sharedDir, "mapping.prom"), []byte(mappingText), 0o644); err != nil {
-		return fmt.Errorf("write mapping.prom: %w", err)
 	}
 
 	rulesYAML := enrich.PathHealthRules(jk)
@@ -191,7 +190,7 @@ func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[
 		return fmt.Errorf("write evaluator.yaml: %w", err)
 	}
 
-	log.Printf("_shared/: wrote mapping.prom (%d points), %s, %s, evaluator.yaml", len(allPoints), enrich.RulesFileName, enrich.AlertsFileName)
+	log.Printf("_shared/: wrote %s, %s, evaluator.yaml (curated apps: %s)", enrich.RulesFileName, enrich.AlertsFileName, strings.Join(opts.CuratedApps, ","))
 	return nil
 }
 

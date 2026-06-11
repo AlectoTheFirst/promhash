@@ -67,7 +67,7 @@ func pathHealthAlerts(jk JoinKey) []alertRule {
 			},
 			Annotations: map[string]string{
 				"summary":     "promhash mapping series absent — all path-health rules evaluate to nothing",
-				"description": "promhash_interface_app is not present in the evaluator. The mapping scrape is broken or the mapping file is empty; every app:* path-health series has stopped.",
+				"description": "promhash_interface_app is not present in the evaluator. The mapping scrape against promhash-api is broken or serves no rows; every app:* path-health series has stopped.",
 			},
 		},
 		{
@@ -79,7 +79,7 @@ func pathHealthAlerts(jk JoinKey) []alertRule {
 			},
 			Annotations: map[string]string{
 				"summary":     "promhash mapping scrape target down",
-				"description": "The promhash-mapping scrape job cannot reach the mapping server. Once the mapping series go stale the path-health rules evaluate to nothing.",
+				"description": "The promhash-mapping scrape job cannot reach promhash-api. Once the mapping series go stale the path-health rules evaluate to nothing.",
 			},
 		},
 		{
@@ -103,7 +103,7 @@ func pathHealthAlerts(jk JoinKey) []alertRule {
 			},
 			Annotations: map[string]string{
 				"summary":     "mapping rows match no counter series — stale or mis-keyed mapping",
-				"description": "{{ $value }} mapping row(s) have a join key that intersects no ifHCInOctets series. Causes: interface renamed/renumbered/retired since the last promhash-enrich run, or a label mismatch between mapping and counters. Re-run promhash-catalog and promhash-enrich.",
+				"description": "{{ $value }} mapping row(s) have a join key that intersects no ifHCInOctets series. Causes: interface renamed/renumbered/retired since the last catalog sync, or a label mismatch between mapping and counters. Re-run promhash-catalog.",
 			},
 		},
 		{

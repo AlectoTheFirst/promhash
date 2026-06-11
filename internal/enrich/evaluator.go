@@ -14,9 +14,9 @@ import (
 // config therefore contains NO counters scrape job — only the mapping scrape,
 // the rule files, the tenant identity, and the onward remote_write.
 type EvaluatorOpts struct {
-	// MappingTarget is the host:port serving the rendered mapping.prom
-	// exposition text (see RenderMappingSeries). The path-health rules join the
-	// raw counters against promhash_interface_app, so the evaluator MUST ingest
+	// MappingTarget is the host:port of the promhash-api instance serving the
+	// live GET /mapping.prom exposition. The path-health rules join the raw
+	// counters against promhash_interface_app, so the evaluator MUST ingest
 	// the mapping series or every rule evaluates to empty. When MappingTarget
 	// is empty no mapping scrape job is emitted (the caller is expected to
 	// reject that configuration).
@@ -24,6 +24,18 @@ type EvaluatorOpts struct {
 	// MappingMetricsPath is the HTTP path of the mapping exposition on
 	// MappingTarget. Empty means the default "/mapping.prom".
 	MappingMetricsPath string
+	// CuratedApps is the curated application set, rendered as the mapping
+	// scrape job's "apps" query parameter. The API serves mapping rows for
+	// exactly these apps, so the curated set stays an enrich-time decision
+	// even though the mapping data itself is served live from the graph.
+	CuratedApps []string
+	// APITokenFile, when non-empty, is rendered as the mapping scrape job's
+	// authorization credentials_file: the path (on the promhash Prometheus
+	// host) of a file holding a Bearer token accepted by promhash-api. The
+	// token itself never appears in the generated config, which is committed
+	// to git. Empty omits the authorization block (for -insecure-no-auth
+	// API deployments).
+	APITokenFile string
 	// RemoteWriteURL is the URL of the onward remote_write receiver
 	// (long-term storage).
 	RemoteWriteURL string
@@ -54,11 +66,20 @@ type evaluatorStaticConfigDoc struct {
 	Targets []string `yaml:"targets"`
 }
 
+// evaluatorAuthorizationDoc is the authorization block of a scrape_config.
+// Only credentials_file is supported: the generated config is committed to
+// git, so it must never carry the credential inline.
+type evaluatorAuthorizationDoc struct {
+	CredentialsFile string `yaml:"credentials_file"`
+}
+
 // evaluatorScrapeConfigDoc is one entry in a scrape_configs list.
 type evaluatorScrapeConfigDoc struct {
 	JobName       string                     `yaml:"job_name"`
 	HonorLabels   bool                       `yaml:"honor_labels,omitempty"`
 	MetricsPath   string                     `yaml:"metrics_path,omitempty"`
+	Params        map[string][]string        `yaml:"params,omitempty"`
+	Authorization *evaluatorAuthorizationDoc `yaml:"authorization,omitempty"`
 	StaticConfigs []evaluatorStaticConfigDoc `yaml:"static_configs"`
 }
 
@@ -78,11 +99,13 @@ type evaluatorConfigDoc struct {
 
 // SharedEvaluatorConfig renders the promhash Prometheus config that:
 //   - stamps opts.TenantLabel as global.external_labels.tenant
-//   - scrapes the mapping exposition (promhash_interface_app) from
-//     opts.MappingTarget (job_name "promhash-mapping") with honor_labels: true,
-//     so the mapping's identity labels (instance, ifIndex, iface) survive the
-//     scrape instead of being rewritten to the mapping server's address — the
-//     path-health joins depend on them
+//   - scrapes the live mapping exposition (promhash_interface_app) from the
+//     promhash-api at opts.MappingTarget (job_name "promhash-mapping") with
+//     honor_labels: true, so the mapping's identity labels (instance, ifIndex,
+//     iface) survive the scrape instead of being rewritten to the API's
+//     address — the path-health joins depend on them. The curated app set is
+//     passed as the "apps" query parameter; the API token (if any) is read
+//     from a credentials file so no secret lands in the generated config.
 //   - loads path-health.rules.yaml and path-health.alerts.yaml via rule_files
 //   - remote_writes the results to opts.RemoteWriteURL
 //
@@ -101,14 +124,21 @@ func SharedEvaluatorConfig(opts EvaluatorOpts) string {
 		if path == "" {
 			path = DefaultMappingMetricsPath
 		}
-		scrapes = append(scrapes, evaluatorScrapeConfigDoc{
+		job := evaluatorScrapeConfigDoc{
 			JobName:     "promhash-mapping",
 			HonorLabels: true,
 			MetricsPath: path,
 			StaticConfigs: []evaluatorStaticConfigDoc{
 				{Targets: []string{opts.MappingTarget}},
 			},
-		})
+		}
+		if len(opts.CuratedApps) > 0 {
+			job.Params = map[string][]string{"apps": {strings.Join(opts.CuratedApps, ",")}}
+		}
+		if opts.APITokenFile != "" {
+			job.Authorization = &evaluatorAuthorizationDoc{CredentialsFile: opts.APITokenFile}
+		}
+		scrapes = append(scrapes, job)
 	}
 
 	doc := evaluatorConfigDoc{

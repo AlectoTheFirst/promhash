@@ -15,7 +15,8 @@ docker compose logs -f init   # bootstrap: catalog -> loader -> enrich
 
 The `init` job waits for the first scrape, syncs the catalog, validates and
 loads `declared/*.yaml`, and writes the `_shared/` artifacts that the promhash
-Prometheus and the mapping server consume.
+Prometheus consumes. The mapping series itself is served live by promhash-api
+at `GET /mapping.prom` and scraped from there.
 
 ## The synthetic topology
 

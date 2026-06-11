@@ -38,6 +38,9 @@ type Repo interface {
 	InterfaceImpactByInstanceIndex(ctx context.Context, instance string, ifIndex int, at time.Time) ([]graph.ImpactRow, error)
 	// ListApps returns the identifiers of all known applications.
 	ListApps(ctx context.Context) ([]string, error)
+	// AppServiceName returns the application-service name an application runs
+	// as (falling back to the app name itself when none is recorded).
+	AppServiceName(ctx context.Context, app string) (string, error)
 	// ListAllInterfaces returns every known interface, used by lookupImpact to
 	// build a catalog.Resolver that maps raw query params to canonical phashes.
 	ListAllInterfaces(ctx context.Context) ([]graph.Iface, error)
@@ -60,6 +63,7 @@ func NewServer(r Repo) *Server {
 	s.mux.HandleFunc("GET /apps/{app}/ifaces", s.appIfaces)
 	s.mux.HandleFunc("GET /interface-apps", s.ifaceApps)
 	s.mux.HandleFunc("GET /impact", s.impact)
+	s.mux.HandleFunc("GET /mapping.prom", s.mappingProm)
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /readyz", s.readyz)
 	s.mux.Handle("GET /metrics", promhttp.Handler())
@@ -148,6 +152,47 @@ func (s *Server) appIfaces(w http.ResponseWriter, r *http.Request) {
 	}
 	// IfaceSelectors returns a non-nil, sorted, deduplicated slice.
 	writeJSON(w, enrich.IfaceSelectors(hops))
+}
+
+// mappingProm serves the bounded promhash_interface_app mapping exposition
+// live from the graph for the curated apps named in the required "apps" query
+// parameter (comma-separated). The promhash Prometheus scrapes this endpoint
+// directly, so the mapping is always as fresh as the last catalog sync and no
+// generated data file has to travel through a GitOps pipeline. Apps with no
+// known path contribute no rows. The curated set itself stays an enrich-time
+// decision: promhash-enrich bakes it into the generated scrape job's params.
+func (s *Server) mappingProm(w http.ResponseWriter, r *http.Request) {
+	appsParam := strings.TrimSpace(r.URL.Query().Get("apps"))
+	if appsParam == "" {
+		http.Error(w, "apps query parameter is required (comma-separated curated app names)", http.StatusBadRequest)
+		return
+	}
+	t := time.Now()
+	var points []enrich.MappingPoint
+	for _, app := range strings.Split(appsParam, ",") {
+		app = strings.TrimSpace(app)
+		if app == "" {
+			continue
+		}
+		hops, err := s.repo.AppPath(r.Context(), phash.Hash(phash.KindApp, app), t)
+		if err != nil {
+			log.Printf("api: mapping AppPath(%s): %v", app, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if len(hops) == 0 {
+			continue
+		}
+		svc, err := s.repo.AppServiceName(r.Context(), app)
+		if err != nil {
+			log.Printf("api: mapping AppServiceName(%s): %v", app, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		points = append(points, enrich.MappingSeries(app, svc, hops, enrich.JoinByIfName)...)
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = w.Write([]byte(enrich.RenderMappingSeries(points)))
 }
 
 // healthz is the liveness probe: the process is up and serving.
