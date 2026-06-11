@@ -75,6 +75,27 @@ func exprFor(t *testing.T, jk JoinKey, record string) string {
 	return ""
 }
 
+// exprsFor returns ALL rendered exprs for a record name (some records — the
+// per-direction util pair — are written by more than one rule).
+func exprsFor(t *testing.T, jk JoinKey, record string) []string {
+	t.Helper()
+
+	var doc ruleGroupsDoc
+	if err := yaml.Unmarshal([]byte(PathHealthRules(jk)), &doc); err != nil {
+		t.Fatalf("unmarshal PathHealthRules: %v", err)
+	}
+	var out []string
+	for _, r := range doc.Groups[0].Rules {
+		if r.Record == record {
+			out = append(out, r.Expr)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("record %q not found in PathHealthRules(%v)", record, jk)
+	}
+	return out
+}
+
 // labelMapFromLabels flattens a labels.Labels into a plain map for assertions.
 func labelMapFromLabels(ls labels.Labels) map[string]string {
 	m := map[string]string{}
@@ -109,10 +130,19 @@ func TestPathHealthRules_UnmarshalsAndShape(t *testing.T) {
 		"app:if_ingress_octets:rate5m",
 		"app:if_capacity_bps",
 		"app:if_oper_up:state",
-		"app:if_util:ratio",
+		"app:if_in_errors:rate5m",
+		"app:if_out_errors:rate5m",
+		"app:if_in_discards:rate5m",
+		"app:if_out_discards:rate5m",
+		"app:if_alerts_firing:count",
+		"app:if_util:ratio", // egress variant
+		"app:if_util:ratio", // ingress variant (disjoint direction label sets)
 		"app:path_util_max:ratio",
 		"app:path_oper_up_min:state",
 		"app:path_hops_down:count",
+		"app:path_errors:rate5m",
+		"app:path_discards:rate5m",
+		"app:path_alerts_firing:count",
 	}
 	if len(doc.Groups[0].Rules) != len(wantRecords) {
 		t.Fatalf("got %d rules, want %d", len(doc.Groups[0].Rules), len(wantRecords))
@@ -154,17 +184,29 @@ func TestPathHealthRules_JoinKeys(t *testing.T) {
 		}
 	}
 
-	// Rollups: MAX for util, MIN for oper-up, COUNT for hops-down, all by(app, service).
-	// hops-down uses `== 0` as a FILTER (no bool), so only down hops are counted.
+	// Rollups: MAX for util, MIN for oper-up, all by(app, service).
+	// hops-down uses sum(1 - state) so a fully-healthy path reads 0 instead of
+	// an absent series.
 	checks := []string{
 		"max by(app, service)(app:if_util:ratio)",
 		"min by(app, service)(app:if_oper_up:state)",
-		"count by(app, service)(app:if_oper_up:state == 0)",
+		"sum by(app, service)(1 - app:if_oper_up:state)",
+		"(sum by(app, service)(app:if_in_errors:rate5m) + sum by(app, service)(app:if_out_errors:rate5m))",
+		"(sum by(app, service)(app:if_in_discards:rate5m) + sum by(app, service)(app:if_out_discards:rate5m))",
+		"sum by(app, service)(app:if_alerts_firing:count)",
 	}
 	for _, want := range checks {
 		if !strings.Contains(composite, want) {
 			t.Errorf("missing rollup expr %q\n%s", want, composite)
 		}
+	}
+
+	// The ALERTS pre-collapse must group by the join-key labels of each mode.
+	if !strings.Contains(composite, `count by(iface)(ALERTS{alertstate="firing"})`) {
+		t.Errorf("JoinByComposite missing iface-grouped ALERTS pre-collapse\n%s", composite)
+	}
+	if !strings.Contains(ifname, `count by(instance, ifName)(ALERTS{alertstate="firing"})`) {
+		t.Errorf("JoinByIfName missing (instance, ifName)-grouped ALERTS pre-collapse\n%s", ifname)
 	}
 }
 
@@ -292,6 +334,25 @@ app:if_oper_up:state{app="payments", service="svc", iface="10.0.0.1:8"} 0+0x6
 	}
 }
 
+// Test 5a: a fully-healthy path must read hops_down = 0 as an EXPLICIT series,
+// not an absent one. This is the absent-vs-zero guard: with sum(1 - state),
+// "no data" can only ever mean the pipeline is broken, never "all healthy".
+func TestPathHealth_HopsDownZeroWhenAllHealthy(t *testing.T) {
+	const load = `load 1m
+app:if_oper_up:state{app="payments", service="svc", iface="10.0.0.1:7"} 1+0x6
+app:if_oper_up:state{app="payments", service="svc", iface="10.0.0.1:8"} 1+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:path_hops_down:count")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected 1 series with value 0 (not absent), got %d: %v", len(vec), vec)
+	}
+	if got := vec[0].F; got != 0 {
+		t.Errorf("hops_down = %v, want 0", got)
+	}
+}
+
 // Test 5b: a single transit iface emits BOTH an ingress and an egress mapping
 // series for the same app. The direction-agnostic oper_up rule must collapse
 // that multiplicity to exactly ONE app:if_oper_up:state series per (iface, app),
@@ -353,23 +414,25 @@ app:if_egress_octets:rate5m{app="payments", service="svc", iface="10.0.0.1:7"} 1
 	}
 }
 
-// TestPathHealth_UtilRatioDivisionProducesValue asserts that the util division
-// correctly matches across the direction label mismatch between numerator and
-// denominator. The egress-rate series carries direction="egress"; the capacity
-// series has NO direction label (collapsed via max without(direction)). Without
-// ignoring(direction), Prometheus default one-to-one matching would silently
-// produce ZERO series. With ignoring(direction) it must yield exactly ONE series
-// with value 0.5 (1000 bytes/s * 8 / 16000 bps) and NO direction label.
+// TestPathHealth_UtilRatioDivisionProducesValue asserts the egress util
+// division matches one-to-one on the FULL label set: the egress-rate series
+// and the (per-direction) capacity series both carry direction="egress", so a
+// plain division yields exactly ONE series, value 0.5 (1000 bytes/s * 8 /
+// 16000 bps), retaining the direction label.
 func TestPathHealth_UtilRatioDivisionProducesValue(t *testing.T) {
 	const load = `load 1m
 app:if_egress_octets:rate5m{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7",direction="egress"} 1000+0x6
-app:if_capacity_bps{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7"} 16000+0x6
+app:if_capacity_bps{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7",direction="egress"} 16000+0x6
 `
-	expr := exprFor(t, JoinByComposite, "app:if_util:ratio")
-	vec := evalExpr(t, load, expr, at(5*time.Minute))
+	exprs := exprsFor(t, JoinByComposite, "app:if_util:ratio")
+	if len(exprs) != 2 {
+		t.Fatalf("expected 2 util rules (egress + ingress), got %d: %v", len(exprs), exprs)
+	}
 
+	// exprs[0] is the egress variant (rule order is fixed).
+	vec := evalExpr(t, load, exprs[0], at(5*time.Minute))
 	if len(vec) != 1 {
-		t.Fatalf("expected exactly 1 util series (ignoring(direction) must bridge the label mismatch), got %d: %v", len(vec), vec)
+		t.Fatalf("expected exactly 1 util series, got %d: %v", len(vec), vec)
 	}
 
 	const wantVal = 0.5 // 1000 * 8 / 16000
@@ -378,17 +441,151 @@ app:if_capacity_bps{app="payments",service="svc",device="rtr1",ifName="Te0/1",in
 	}
 
 	lm := labelMapFromLabels(vec[0].Metric)
-	if _, ok := lm["direction"]; ok {
-		t.Errorf("result must NOT carry direction label (utilization is per-iface, not per-direction); got labels: %v", lm)
-	}
-	// Confirm the identity labels are present.
 	for k, want := range map[string]string{
-		"app":     "payments",
-		"service": "svc",
-		"iface":   "10.0.0.1:7",
+		"app":       "payments",
+		"service":   "svc",
+		"iface":     "10.0.0.1:7",
+		"direction": "egress",
 	} {
 		if lm[k] != want {
 			t.Errorf("label %q = %q, want %q (labels: %v)", k, lm[k], want, lm)
+		}
+	}
+}
+
+// TestPathHealth_IngressUtilProducesValue: an ingress-declared hop must get a
+// utilization series too — the second util rule divides the ingress rate by
+// the direction="ingress" capacity series. This is the guard against the
+// egress-only utilization gap (a saturated inbound link invisible to
+// path_util_max).
+func TestPathHealth_IngressUtilProducesValue(t *testing.T) {
+	const load = `load 1m
+app:if_ingress_octets:rate5m{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7",direction="ingress"} 2000+0x6
+app:if_capacity_bps{app="payments",service="svc",device="rtr1",ifName="Te0/1",instance="10.0.0.1",ifIndex="7",iface="10.0.0.1:7",direction="ingress"} 16000+0x6
+`
+	exprs := exprsFor(t, JoinByComposite, "app:if_util:ratio")
+	vec := evalExpr(t, load, exprs[1], at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected exactly 1 ingress util series, got %d: %v", len(vec), vec)
+	}
+	const wantVal = 1.0 // 2000 * 8 / 16000
+	if got := vec[0].F; got != wantVal {
+		t.Errorf("ingress util = %v, want %v", got, wantVal)
+	}
+	lm := labelMapFromLabels(vec[0].Metric)
+	if lm["direction"] != "ingress" {
+		t.Errorf("direction = %q, want ingress (labels: %v)", lm["direction"], lm)
+	}
+}
+
+// TestPathHealth_CapacityPerDirection: a transit interface (mapping rows for
+// BOTH directions) must yield one capacity series per direction — the raw
+// (non-collapsed) mapping join. This duplication is what lets each util rule
+// divide one-to-one on the full label set.
+func TestPathHealth_CapacityPerDirection(t *testing.T) {
+	const load = `load 1m
+ifHighSpeed{instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", ifName="Te0/1"} 10000+0x6
+promhash_interface_app{app="payments", service="svc", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="ingress"} 1+0x6
+promhash_interface_app{app="payments", service="svc", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="egress"} 1+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:if_capacity_bps")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 2 {
+		t.Fatalf("expected 2 capacity series (one per direction), got %d: %v", len(vec), vec)
+	}
+	dirs := map[string]struct{}{}
+	for _, s := range vec {
+		lm := labelMapFromLabels(s.Metric)
+		dirs[lm["direction"]] = struct{}{}
+		if want := 10000 * 1e6; s.F != want {
+			t.Errorf("capacity = %v, want %v (10000 Mbit/s * 1e6)", s.F, want)
+		}
+	}
+	for _, d := range []string{"ingress", "egress"} {
+		if _, ok := dirs[d]; !ok {
+			t.Errorf("missing capacity series for direction=%s; got %v", d, dirs)
+		}
+	}
+}
+
+// TestPathHealth_ErrorRateJoinsCollapsed: error counters join against the
+// direction-collapsed mapping, so a transit interface (two mapping rows)
+// yields exactly ONE error-rate series per (interface, app).
+func TestPathHealth_ErrorRateJoinsCollapsed(t *testing.T) {
+	const load = `load 1m
+ifInErrors{instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", ifName="Te0/1"} 0+60x6
+promhash_interface_app{app="payments", service="svc", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="ingress"} 1+0x6
+promhash_interface_app{app="payments", service="svc", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="egress"} 1+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:if_in_errors:rate5m")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 1 {
+		t.Fatalf("expected exactly 1 error-rate series (direction collapsed), got %d: %v", len(vec), vec)
+	}
+	if vec[0].F <= 0 {
+		t.Errorf("error rate = %v, want > 0", vec[0].F)
+	}
+	lm := labelMapFromLabels(vec[0].Metric)
+	if _, ok := lm["direction"]; ok {
+		t.Errorf("direction label should be collapsed away, got %v", lm)
+	}
+}
+
+// TestPathHealth_PathErrorsRollupUnionsInAndOut: the rollup must sum BOTH the
+// in- and out-error series even though they carry identical label sets — the
+// `or` union keeps both because their metric names differ. 1/s in + 2/s out
+// → 3/s per path. Also guards the one-sided case: a hop exposing only one of
+// the two counters still contributes.
+func TestPathHealth_PathErrorsRollupUnionsInAndOut(t *testing.T) {
+	const load = `load 1m
+app:if_in_errors:rate5m{app="payments", service="svc", iface="10.0.0.1:7"} 1+0x6
+app:if_out_errors:rate5m{app="payments", service="svc", iface="10.0.0.1:7"} 2+0x6
+app:if_in_errors:rate5m{app="ledger", service="led", iface="10.0.0.1:7"} 5+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:path_errors:rate5m")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 2 {
+		t.Fatalf("expected 2 rollup series (payments + ledger), got %d: %v", len(vec), vec)
+	}
+	got := map[string]float64{}
+	for _, s := range vec {
+		lm := labelMapFromLabels(s.Metric)
+		got[lm["app"]] = s.F
+	}
+	if got["payments"] != 3 {
+		t.Errorf("payments path errors = %v, want 3 (1 in + 2 out — `or` must union, not dedup)", got["payments"])
+	}
+	if got["ledger"] != 5 {
+		t.Errorf("ledger path errors = %v, want 5 (in-only hop must still contribute)", got["ledger"])
+	}
+}
+
+// TestPathHealth_AlertsCountCollapsesAlertnameMultiplicity: two different
+// firing alerts on one interface mapped to two apps. ALERTS × mapping is
+// M alerts × N apps — inexpressible as a direct vector match — so the rule
+// pre-collapses with count by(join labels). Expect one series per app, each
+// valued 2.
+func TestPathHealth_AlertsCountCollapsesAlertnameMultiplicity(t *testing.T) {
+	const load = `load 1m
+ALERTS{alertname="InterfaceDown", alertstate="firing", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", ifName="Te0/1"} 1+0x6
+ALERTS{alertname="InterfaceErrors", alertstate="firing", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", ifName="Te0/1"} 1+0x6
+promhash_interface_app{app="payments", service="pay", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="egress"} 1+0x6
+promhash_interface_app{app="ledger", service="led", device="rtr1", ifName="Te0/1", instance="10.0.0.1", ifIndex="7", iface="10.0.0.1:7", direction="egress"} 1+0x6
+`
+	expr := exprFor(t, JoinByComposite, "app:if_alerts_firing:count")
+	vec := evalExpr(t, load, expr, at(5*time.Minute))
+
+	if len(vec) != 2 {
+		t.Fatalf("expected 2 series (one per app), got %d: %v", len(vec), vec)
+	}
+	for _, s := range vec {
+		lm := labelMapFromLabels(s.Metric)
+		if s.F != 2 {
+			t.Errorf("app=%q alerts count = %v, want 2 (both alertnames collapsed)", lm["app"], s.F)
 		}
 	}
 }

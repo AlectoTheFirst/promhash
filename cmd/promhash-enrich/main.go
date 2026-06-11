@@ -27,7 +27,6 @@ func run() error {
 	var (
 		neoURL, neoUser, neoPass string
 		outDir, allowlist        string
-		mainProm                 string
 		mappingTarget            string
 		mappingPath              string
 		remoteWriteURL           string
@@ -40,12 +39,11 @@ func run() error {
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
 	flag.StringVar(&outDir, "out", "gitops/enrichment", "output dir for artifacts")
 	flag.StringVar(&allowlist, "apps", "", "comma-separated curated app names")
-	flag.StringVar(&mainProm, "main-prom", "", "scrape target host:port for the shared evaluator (ScrapeTarget)")
 	flag.StringVar(&mappingTarget, "mapping-target", "", "host:port serving the rendered mapping.prom for the evaluator's mapping scrape job")
 	flag.StringVar(&mappingPath, "mapping-path", "", "HTTP path of the mapping exposition on -mapping-target (default /mapping.prom)")
-	flag.StringVar(&remoteWriteURL, "remote-write-url", "", "URL of the remote_write receiver")
+	flag.StringVar(&remoteWriteURL, "remote-write-url", "", "URL of the onward remote_write receiver (long-term storage)")
 	flag.StringVar(&tenantLabel, "tenant-label", "", "value stamped as global.external_labels.tenant")
-	flag.StringVar(&joinKeyStr, "join-key", "composite", "join key for path-health rules: composite (default) or ifname")
+	flag.StringVar(&joinKeyStr, "join-key", "ifname", "join key for path-health rules: ifname (default) or composite (requires the counter-scraping Prometheus to synthesize the iface label)")
 	flag.BoolVar(&pruneLegacy, "prune-legacy", false, "remove stale per-app legacy artifacts (federate.match, rules.yaml, scrape.yaml) from outDir")
 	flag.Parse()
 
@@ -53,7 +51,7 @@ func run() error {
 		neoPass = os.Getenv("NEO4J_PASS")
 	}
 
-	if err := validateRequiredFlags(mainProm, mappingTarget, remoteWriteURL, tenantLabel); err != nil {
+	if err := validateRequiredFlags(mappingTarget, remoteWriteURL, tenantLabel); err != nil {
 		return err
 	}
 
@@ -96,15 +94,13 @@ func run() error {
 	}
 
 	opts := enrich.EvaluatorOpts{
-		ScrapeTarget:       mainProm,
 		MappingTarget:      mappingTarget,
 		MappingMetricsPath: mappingPath,
 		RemoteWriteURL:     remoteWriteURL,
 		TenantLabel:        tenantLabel,
-		JoinKey:            jk,
 	}
 
-	if err := writeSharedArtifacts(outDir, apps, svcNames, opts); err != nil {
+	if err := writeSharedArtifacts(outDir, apps, svcNames, jk, opts); err != nil {
 		return err
 	}
 
@@ -118,13 +114,13 @@ func run() error {
 }
 
 // validateRequiredFlags rejects an invocation missing any flag without which
-// the generated evaluator.yaml would be silently broken: no counter scrape, no
-// mapping ingestion (rules join against nothing), no remote_write destination,
-// or no tenant identity.
-func validateRequiredFlags(mainProm, mappingTarget, remoteWriteURL, tenantLabel string) error {
+// the generated evaluator.yaml would be silently broken: no mapping ingestion
+// (rules join against nothing), no remote_write destination, or no tenant
+// identity. The raw counters need no flag — they arrive via remote_write from
+// the main Prometheus, configured out of band.
+func validateRequiredFlags(mappingTarget, remoteWriteURL, tenantLabel string) error {
 	var missing []string
 	for _, f := range []struct{ name, val string }{
-		{"-main-prom", mainProm},
 		{"-mapping-target", mappingTarget},
 		{"-remote-write-url", remoteWriteURL},
 		{"-tenant-label", tenantLabel},
@@ -153,14 +149,15 @@ func parseJoinKey(s string) (enrich.JoinKey, error) {
 }
 
 // writeSharedArtifacts builds the combined mapping points for all apps and
-// writes the three shared artifacts under dir/_shared/:
+// writes the four shared artifacts under dir/_shared/:
 //
-//   - mapping.prom       — promhash_interface_app{…}=1 exposition text
-//   - path-health.rules.yaml — static path-health recording-rule group
-//   - evaluator.yaml         — shared Prometheus-agent config
+//   - mapping.prom            — promhash_interface_app{…}=1 exposition text
+//   - path-health.rules.yaml  — static path-health recording-rule group
+//   - path-health.alerts.yaml — pipeline + path alerting rules
+//   - evaluator.yaml          — promhash Prometheus config shell (receiver mode)
 //
 // It does NOT require a live Neo4j; all inputs are pre-resolved by the caller.
-func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[string]string, opts enrich.EvaluatorOpts) error {
+func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[string]string, jk enrich.JoinKey, opts enrich.EvaluatorOpts) error {
 	sharedDir := filepath.Join(dir, "_shared")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", sharedDir, err)
@@ -170,7 +167,7 @@ func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[
 	var allPoints []enrich.MappingPoint
 	for app, hops := range apps {
 		svc := svcNames[app]
-		pts := enrich.MappingSeries(app, svc, hops, opts.JoinKey)
+		pts := enrich.MappingSeries(app, svc, hops, jk)
 		allPoints = append(allPoints, pts...)
 	}
 
@@ -179,9 +176,14 @@ func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[
 		return fmt.Errorf("write mapping.prom: %w", err)
 	}
 
-	rulesYAML := enrich.PathHealthRules(opts.JoinKey)
-	if err := os.WriteFile(filepath.Join(sharedDir, "path-health.rules.yaml"), []byte(rulesYAML), 0o644); err != nil {
-		return fmt.Errorf("write path-health.rules.yaml: %w", err)
+	rulesYAML := enrich.PathHealthRules(jk)
+	if err := os.WriteFile(filepath.Join(sharedDir, enrich.RulesFileName), []byte(rulesYAML), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", enrich.RulesFileName, err)
+	}
+
+	alertsYAML := enrich.PathHealthAlerts(jk)
+	if err := os.WriteFile(filepath.Join(sharedDir, enrich.AlertsFileName), []byte(alertsYAML), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", enrich.AlertsFileName, err)
 	}
 
 	evaluatorYAML := enrich.SharedEvaluatorConfig(opts)
@@ -189,7 +191,7 @@ func writeSharedArtifacts(dir string, apps map[string][]graph.Hop, svcNames map[
 		return fmt.Errorf("write evaluator.yaml: %w", err)
 	}
 
-	log.Printf("_shared/: wrote mapping.prom (%d points), path-health.rules.yaml, evaluator.yaml", len(allPoints))
+	log.Printf("_shared/: wrote mapping.prom (%d points), %s, %s, evaluator.yaml", len(allPoints), enrich.RulesFileName, enrich.AlertsFileName)
 	return nil
 }
 

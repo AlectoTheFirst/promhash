@@ -16,14 +16,20 @@ import (
 )
 
 // testOpts returns a populated EvaluatorOpts for use in tests.
-func testOpts(jk enrich.JoinKey) enrich.EvaluatorOpts {
+func testOpts() enrich.EvaluatorOpts {
 	return enrich.EvaluatorOpts{
-		ScrapeTarget:   "raw-counters:9116",
 		MappingTarget:  "mapping-server:8443",
 		RemoteWriteURL: "http://mimir:9090/api/v1/push",
 		TenantLabel:    "test-tenant",
-		JoinKey:        jk,
 	}
+}
+
+// allSharedArtifacts is the complete expected file set under _shared/.
+var allSharedArtifacts = []string{
+	"mapping.prom",
+	"path-health.rules.yaml",
+	"path-health.alerts.yaml",
+	"evaluator.yaml",
 }
 
 // sharedHop is a transit hop shared by two apps in the multi-app tests.
@@ -50,16 +56,16 @@ func buildTwoAppInput() (apps map[string][]graph.Hop, svcNames map[string]string
 	return
 }
 
-// Test 1: writeSharedArtifacts writes all three files under tmp/_shared/.
+// Test 1: writeSharedArtifacts writes all four files under tmp/_shared/.
 func TestWriteSharedArtifacts_AllFilesExist(t *testing.T) {
 	tmp := t.TempDir()
 	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, testOpts(enrich.JoinByComposite)); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
-	for _, name := range []string{"mapping.prom", "path-health.rules.yaml", "evaluator.yaml"} {
+	for _, name := range allSharedArtifacts {
 		p := filepath.Join(tmp, "_shared", name)
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected %s to exist, got: %v", p, err)
@@ -74,7 +80,7 @@ func TestWriteSharedArtifacts_MappingSharedHopTwoSeries(t *testing.T) {
 	tmp := t.TempDir()
 	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, testOpts(enrich.JoinByComposite)); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -159,7 +165,7 @@ func TestWriteSharedArtifacts_PathHealthRulesGroup(t *testing.T) {
 	tmp := t.TempDir()
 	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, testOpts(enrich.JoinByComposite)); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -190,9 +196,9 @@ func TestWriteSharedArtifacts_PathHealthRulesGroup(t *testing.T) {
 func TestWriteSharedArtifacts_EvaluatorYAML(t *testing.T) {
 	tmp := t.TempDir()
 	apps, svcNames := buildTwoAppInput()
-	opts := testOpts(enrich.JoinByComposite)
+	opts := testOpts()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, opts); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, opts); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -230,7 +236,7 @@ func TestWriteSharedArtifacts_NoPerAppFederateMatch(t *testing.T) {
 	tmp := t.TempDir()
 	apps, svcNames := buildTwoAppInput()
 
-	if err := writeSharedArtifacts(tmp, apps, svcNames, testOpts(enrich.JoinByComposite)); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -248,7 +254,7 @@ func TestPruneLegacyArtifacts(t *testing.T) {
 	apps, svcNames := buildTwoAppInput()
 
 	// First write the shared artifacts so _shared/ exists.
-	if err := writeSharedArtifacts(tmp, apps, svcNames, testOpts(enrich.JoinByComposite)); err != nil {
+	if err := writeSharedArtifacts(tmp, apps, svcNames, enrich.JoinByComposite, testOpts()); err != nil {
 		t.Fatalf("writeSharedArtifacts: %v", err)
 	}
 
@@ -278,8 +284,8 @@ func TestPruneLegacyArtifacts(t *testing.T) {
 		}
 	}
 
-	// _shared/ must still contain all three artifacts.
-	for _, name := range []string{"mapping.prom", "path-health.rules.yaml", "evaluator.yaml"} {
+	// _shared/ must still contain all four artifacts.
+	for _, name := range allSharedArtifacts {
 		p := filepath.Join(tmp, "_shared", name)
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("_shared/%s unexpectedly missing after prune: %v", name, err)
@@ -325,11 +331,11 @@ func TestPruneLegacyArtifacts_RejectsTraversalAppName(t *testing.T) {
 // Test 8: validateRequiredFlags rejects empty/blank required flags and names
 // every missing one; a fully-populated set passes.
 func TestValidateRequiredFlags(t *testing.T) {
-	if err := validateRequiredFlags("prom:9090", "map:8443", "http://rw/push", "tenant-a"); err != nil {
+	if err := validateRequiredFlags("map:8443", "http://rw/push", "tenant-a"); err != nil {
 		t.Errorf("all flags set: unexpected error: %v", err)
 	}
 
-	err := validateRequiredFlags("prom:9090", "  ", "", "tenant-a")
+	err := validateRequiredFlags("  ", "", "tenant-a")
 	if err == nil {
 		t.Fatal("expected error for missing flags, got nil")
 	}
@@ -338,7 +344,7 @@ func TestValidateRequiredFlags(t *testing.T) {
 			t.Errorf("error should name %s; got: %v", want, err)
 		}
 	}
-	if strings.Contains(err.Error(), "-main-prom") {
+	if strings.Contains(err.Error(), "-tenant-label") {
 		t.Errorf("error must not name flags that were provided; got: %v", err)
 	}
 }

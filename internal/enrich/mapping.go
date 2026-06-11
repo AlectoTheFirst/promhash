@@ -10,12 +10,13 @@ import (
 )
 
 // JoinKey selects which label the path-health recording rules use to join the
-// mapping series against the raw counters: the synthesized composite iface
-// label (on(iface)) or the exporter-provided name pair (on(instance, ifName)).
-// It also controls whether SharedEvaluatorConfig emits the iface-synthesizing
-// metric_relabel block. Both IfName and Iface are always populated in every
-// MappingPoint regardless of the JoinKey, so MappingSeries output is
-// join-key-independent.
+// mapping series against the raw counters: the exporter-provided name pair
+// (on(instance, ifName)) or the composite iface label (on(iface)). In the
+// remote-write receiver deployment only JoinByIfName can work — the receiver
+// never relabels remote-written samples, so an iface label exists on the
+// counters only if the SENDER synthesizes it at scrape time. Both IfName and
+// Iface are always populated in every MappingPoint regardless of the JoinKey,
+// so MappingSeries output is join-key-independent.
 type JoinKey int
 
 const (

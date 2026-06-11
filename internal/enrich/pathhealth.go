@@ -16,21 +16,28 @@ type pathHealthRule struct {
 	Expr   string `yaml:"expr"`
 }
 
+// joinKeyLabels returns the comma-separated label list that identifies a
+// physical interface for the given JoinKey. It is used both inside the on(...)
+// join clause and as the by(...) grouping when pre-collapsing ALERTS.
+func joinKeyLabels(jk JoinKey) string {
+	switch jk {
+	case JoinByIfName:
+		return "instance, ifName"
+	default: // JoinByComposite
+		return "iface"
+	}
+}
+
 // joinKeys renders the on(...) join-key clause used by the group_right() rules
 // for the given JoinKey. JoinByComposite joins on the synthesized composite iface
 // label; JoinByIfName joins on (instance, ifName).
 func joinKeys(jk JoinKey) string {
-	switch jk {
-	case JoinByIfName:
-		return "on(instance, ifName)"
-	default: // JoinByComposite
-		return "on(iface)"
-	}
+	return "on(" + joinKeyLabels(jk) + ")"
 }
 
 // pathHealthRules builds the ordered slice of recording rules for the path-health
-// group. The rules are app-independent: they join the raw SNMP counter firehose
-// against RA1's bounded promhash_interface_app{…}=1 mapping series via group_right,
+// group. The rules are app-independent: they join the raw SNMP counters
+// against the bounded promhash_interface_app{…}=1 mapping series via group_right,
 // fanning app/service/device/ifName (and the rest of the mapping's identity
 // labels) onto the counters without ever stamping an app label on the raw series
 // themselves.
@@ -40,24 +47,34 @@ func joinKeys(jk JoinKey) string {
 // operand under group_right(): a single physical interface can be mapped to N
 // apps, so the mapping must be the many side or the join would reject the
 // duplicate-on-one-side match group. The result therefore inherits the mapping's
-// full label set (app/service/device/ifName/iface/instance/ifIndex/direction),
-// and the empty group_right() clause keeps the join-key labels out of the group
-// clause (so JoinByIfName, which joins on(instance, ifName), does not put ifName
-// in both ON and GROUP).
+// full label set, and the empty group_right() clause keeps the join-key labels
+// out of the group clause (so JoinByIfName, which joins on(instance, ifName),
+// does not put ifName in both ON and GROUP).
+//
+// Two different right-operand shapes are used deliberately:
+//
+//   - the RAW mapping (promhash_interface_app, direction retained) for the
+//     octet rates (filtered per direction) and for capacity, so capacity exists
+//     per mapped direction and the utilization division can match one-to-one
+//     on the full label set including direction;
+//   - the COLLAPSED mapping (max without(direction)(…)) for direction-agnostic
+//     facts (oper-up, errors, discards, firing alerts), so a transit interface
+//     — which emits BOTH an ingress and an egress mapping series — yields
+//     exactly one result series per (interface, app) and is never
+//     double-counted by the rollups.
 //
 // This slice is the single source of truth for both PathHealthRules' YAML
 // rendering and any test that wishes to recover the exact exprs.
 func pathHealthRules(jk JoinKey) []pathHealthRule {
 	keys := joinKeys(jk)
-	// group_right(): the mapping (RIGHT) is the many side; the counter (LEFT) is
-	// the one side. The result base is the mapping's full label set, so a shared
-	// link fans one counter out to one result series per mapped app.
 	gr := "group_right()"
+	// collapsed is the direction-agnostic mapping: exactly one series per
+	// physical (interface, app) regardless of transit's two-direction expansion.
+	collapsed := "max without(direction)(promhash_interface_app)"
 
 	return []pathHealthRule{
-		// Per-hop egress octet rate, with app/service/device/ifName (and the rest
-		// of the mapping identity) fanned on from the mapping series for
-		// direction=egress only.
+		// Per-hop egress octet rate, with the mapping identity fanned on, for
+		// direction=egress mapping rows only.
 		{
 			Record: "app:if_egress_octets:rate5m",
 			Expr:   "rate(ifHCOutOctets[5m]) * " + keys + " " + gr + ` promhash_interface_app{direction="egress"}`,
@@ -73,46 +90,75 @@ func pathHealthRules(jk JoinKey) []pathHealthRule {
 		// 0 capacity (or no ifHighSpeed at all) produce no capacity series and
 		// therefore no util series, avoiding div-by-zero infinities downstream.
 		//
-		// This rule is direction-agnostic, but a transit iface emits BOTH an
-		// ingress and an egress mapping series, so joining against the raw mapping
-		// would yield two identical capacity series per (iface, app). Collapse the
-		// direction multiplicity with max without(direction)(…) so there is exactly
-		// one capacity series per physical (iface, app).
+		// Joins the RAW mapping so the result carries direction: one capacity
+		// series per mapped (interface, app, direction). The duplication for a
+		// transit interface is intentional — it lets the utilization rules below
+		// divide one-to-one on the full label set, giving BOTH an egress and an
+		// ingress utilization where both directions are mapped.
 		{
 			Record: "app:if_capacity_bps",
-			Expr:   "(ifHighSpeed > 0) * 1e6 * " + keys + " " + gr + " max without(direction)(promhash_interface_app)",
+			Expr:   "(ifHighSpeed > 0) * 1e6 * " + keys + " " + gr + " promhash_interface_app",
 		},
 		// Operational up-state as a 0/1 gauge. Parenthesize the `== bool 1` so it
 		// binds to ifOperStatus and resolves to a 0/1 value BEFORE the join
-		// multiply; otherwise operator precedence would fold the bool comparison
-		// across the whole expression.
-		//
-		// Direction-agnostic like capacity: collapse the ingress/egress mapping
-		// multiplicity with max without(direction)(…) so a down physical interface
-		// is represented by exactly one oper-up series per (iface, app) and is not
+		// multiply. Collapsed mapping: a down physical interface is represented
+		// by exactly one oper-up series per (interface, app) and is not
 		// double-counted by app:path_hops_down:count.
 		{
 			Record: "app:if_oper_up:state",
-			Expr:   "(ifOperStatus == bool 1) * " + keys + " " + gr + " max without(direction)(promhash_interface_app)",
+			Expr:   "(ifOperStatus == bool 1) * " + keys + " " + gr + " " + collapsed,
 		},
-		// Link utilization ratio: egress bytes/s → bits/s (×8) over capacity bits/s.
-		// Because app:if_capacity_bps has no series where capacity is absent/zero,
-		// the division yields no series there either (rather than +Inf), so the
+		// Error and discard rates. IF-MIB has no HC variants for these; the
+		// 32-bit counters are safe here — wrapping inside one scrape interval
+		// would need >71M events/s at a 60s interval, far beyond any real error
+		// rate (octets are a different story, hence ifHC*Octets above).
+		// Direction-agnostic facts → collapsed mapping.
+		{
+			Record: "app:if_in_errors:rate5m",
+			Expr:   "rate(ifInErrors[5m]) * " + keys + " " + gr + " " + collapsed,
+		},
+		{
+			Record: "app:if_out_errors:rate5m",
+			Expr:   "rate(ifOutErrors[5m]) * " + keys + " " + gr + " " + collapsed,
+		},
+		{
+			Record: "app:if_in_discards:rate5m",
+			Expr:   "rate(ifInDiscards[5m]) * " + keys + " " + gr + " " + collapsed,
+		},
+		{
+			Record: "app:if_out_discards:rate5m",
+			Expr:   "rate(ifOutDiscards[5m]) * " + keys + " " + gr + " " + collapsed,
+		},
+		// Firing alerts touching a hop. ALERTS fans M alerts × N apps per
+		// interface, which PromQL vector matching cannot express directly (the
+		// one side of group_right must be unique per join key). Collapse the
+		// alert multiplicity FIRST with count by(<join labels>), then fan the
+		// per-interface count out to apps. Detail (which alertnames) belongs to
+		// dashboards/Alertmanager, not this series.
+		{
+			Record: "app:if_alerts_firing:count",
+			Expr:   "count by(" + joinKeyLabels(jk) + `)(ALERTS{alertstate="firing"}) * ` + keys + " " + gr + " " + collapsed,
+		},
+		// Link utilization ratio: bytes/s → bits/s (×8) over capacity bits/s.
+		// Two rules share the record name — one per direction — and their output
+		// label sets are disjoint (direction="egress" vs direction="ingress"), so
+		// the series never collide. Each division matches one-to-one on the FULL
+		// label set (capacity carries direction, see app:if_capacity_bps), which
+		// is what makes an ingress-declared hop get a utilization series at all.
+		// Because capacity has no series where ifHighSpeed is absent/zero, the
+		// division yields no series there either (rather than +Inf), so the
 		// ratio is implicitly capacity-gated.
-		//
-		// ignoring(direction): the egress-rate numerator carries direction="egress"
-		// (from its group_right join against promhash_interface_app{direction="egress"}),
-		// but app:if_capacity_bps has no direction label (it was collapsed via
-		// max without(direction)(…) to avoid duplicating capacity for ingress/egress).
-		// Without ignoring(direction), Prometheus default one-to-one matching requires
-		// identical label sets and the division yields ZERO series. The result is
-		// direction-less, which is correct: utilization is a per-interface property.
 		{
 			Record: "app:if_util:ratio",
-			Expr:   "app:if_egress_octets:rate5m * 8 / ignoring(direction) app:if_capacity_bps",
+			Expr:   "app:if_egress_octets:rate5m * 8 / app:if_capacity_bps",
+		},
+		{
+			Record: "app:if_util:ratio",
+			Expr:   "app:if_ingress_octets:rate5m * 8 / app:if_capacity_bps",
 		},
 		// Per-path (per app,service) worst-hop utilization. MAX, never sum/avg:
-		// a path is only as healthy as its most-congested hop.
+		// a path is only as healthy as its most-congested hop. Spans both
+		// directions since app:if_util:ratio now carries direction.
 		{
 			Record: "app:path_util_max:ratio",
 			Expr:   "max by(app, service)(app:if_util:ratio)",
@@ -122,12 +168,37 @@ func pathHealthRules(jk JoinKey) []pathHealthRule {
 			Record: "app:path_oper_up_min:state",
 			Expr:   "min by(app, service)(app:if_oper_up:state)",
 		},
-		// Per-path count of hops currently down. The `== 0` comparison is a
-		// FILTER (no `bool`), so only down hops (value 0) survive into the count;
-		// `== bool 0` would instead map every hop to 0/1 and count ALL hops.
+		// Per-path count of hops currently down. sum(1 - state) — NOT
+		// count(state == 0) — so a fully-healthy path reads as an explicit 0
+		// instead of an absent series. With this shape, "no data" cleanly means
+		// the pipeline is broken, never "everything is fine".
 		{
 			Record: "app:path_hops_down:count",
-			Expr:   "count by(app, service)(app:if_oper_up:state == 0)",
+			Expr:   "sum by(app, service)(1 - app:if_oper_up:state)",
+		},
+		// Per-path error/discard rollups: in + out summed per (app, service).
+		// NOT `sum(in or out)` — PromQL set operators match label sets IGNORING
+		// the metric name, and the per-hop in/out series differ only by name, so
+		// `or` would silently drop the out side. Instead: sum each side, add
+		// them, and `or`-fall back to either side alone so a hop exposing only
+		// one of the two counters still contributes (`+` alone would drop
+		// groups present on a single side).
+		{
+			Record: "app:path_errors:rate5m",
+			Expr: "(sum by(app, service)(app:if_in_errors:rate5m) + sum by(app, service)(app:if_out_errors:rate5m))" +
+				" or sum by(app, service)(app:if_in_errors:rate5m)" +
+				" or sum by(app, service)(app:if_out_errors:rate5m)",
+		},
+		{
+			Record: "app:path_discards:rate5m",
+			Expr: "(sum by(app, service)(app:if_in_discards:rate5m) + sum by(app, service)(app:if_out_discards:rate5m))" +
+				" or sum by(app, service)(app:if_in_discards:rate5m)" +
+				" or sum by(app, service)(app:if_out_discards:rate5m)",
+		},
+		// Per-path firing-alert rollup: total alerts currently touching any hop.
+		{
+			Record: "app:path_alerts_firing:count",
+			Expr:   "sum by(app, service)(app:if_alerts_firing:count)",
 		},
 	}
 }

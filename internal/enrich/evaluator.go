@@ -6,14 +6,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// EvaluatorOpts holds the parameters for generating a shared-evaluator
-// rule-evaluating Prometheus config. It replaces the old per-app
-// federation/tenant model with a single scrape + single remote_write
-// architecture.
+// EvaluatorOpts holds the parameters for generating the promhash Prometheus
+// config shell. The promhash Prometheus is a dedicated remote-write RECEIVER:
+// it gets the raw SNMP counters pushed to it by the main Prometheus (which is
+// configured, out of band, with one remote_write block pointing at it) and
+// must be started with --web.enable-remote-write-receiver. The generated
+// config therefore contains NO counters scrape job — only the mapping scrape,
+// the rule files, the tenant identity, and the onward remote_write.
 type EvaluatorOpts struct {
-	// ScrapeTarget is the host:port (or scheme://host:port) of the raw-counters
-	// endpoint to scrape.
-	ScrapeTarget string
 	// MappingTarget is the host:port serving the rendered mapping.prom
 	// exposition text (see RenderMappingSeries). The path-health rules join the
 	// raw counters against promhash_interface_app, so the evaluator MUST ingest
@@ -24,33 +24,29 @@ type EvaluatorOpts struct {
 	// MappingMetricsPath is the HTTP path of the mapping exposition on
 	// MappingTarget. Empty means the default "/mapping.prom".
 	MappingMetricsPath string
-	// RemoteWriteURL is the URL of the remote_write receiver.
+	// RemoteWriteURL is the URL of the onward remote_write receiver
+	// (long-term storage).
 	RemoteWriteURL string
 	// TenantLabel is stamped as global.external_labels.tenant to identify the
 	// deployment in a multi-tenant remote storage.
 	TenantLabel string
-	// JoinKey controls whether iface-synthesis metric_relabelling is emitted.
-	// JoinByComposite: synthesize iface from [instance, ifIndex] with separator ":".
-	// JoinByIfName: no iface synthesis (rules join on instance,ifName directly).
-	JoinKey JoinKey
 }
 
 // DefaultMappingMetricsPath is the metrics_path used for the mapping scrape
 // job when EvaluatorOpts.MappingMetricsPath is empty.
 const DefaultMappingMetricsPath = "/mapping.prom"
 
+// RulesFileName and AlertsFileName are the rule_files entries referenced by
+// the generated config; they must match the artifact filenames written next
+// to evaluator.yaml.
+const (
+	RulesFileName  = "path-health.rules.yaml"
+	AlertsFileName = "path-health.alerts.yaml"
+)
+
 // evaluatorGlobalDoc is the top-level global: block of the Prometheus config.
 type evaluatorGlobalDoc struct {
 	ExternalLabels map[string]string `yaml:"external_labels"`
-}
-
-// evaluatorRelabelDoc is one entry in a metric_relabel_configs list.
-type evaluatorRelabelDoc struct {
-	SourceLabels []string `yaml:"source_labels"`
-	Separator    string   `yaml:"separator"`
-	TargetLabel  string   `yaml:"target_label"`
-	Regex        string   `yaml:"regex"`
-	Replacement  string   `yaml:"replacement"`
 }
 
 // evaluatorStaticConfigDoc is one entry in a static_configs list.
@@ -60,11 +56,10 @@ type evaluatorStaticConfigDoc struct {
 
 // evaluatorScrapeConfigDoc is one entry in a scrape_configs list.
 type evaluatorScrapeConfigDoc struct {
-	JobName              string                     `yaml:"job_name"`
-	HonorLabels          bool                       `yaml:"honor_labels,omitempty"`
-	MetricsPath          string                     `yaml:"metrics_path,omitempty"`
-	StaticConfigs        []evaluatorStaticConfigDoc `yaml:"static_configs"`
-	MetricRelabelConfigs []evaluatorRelabelDoc      `yaml:"metric_relabel_configs,omitempty"`
+	JobName       string                     `yaml:"job_name"`
+	HonorLabels   bool                       `yaml:"honor_labels,omitempty"`
+	MetricsPath   string                     `yaml:"metrics_path,omitempty"`
+	StaticConfigs []evaluatorStaticConfigDoc `yaml:"static_configs"`
 }
 
 // evaluatorRemoteWriteDoc is one entry in a remote_write list.
@@ -73,53 +68,34 @@ type evaluatorRemoteWriteDoc struct {
 }
 
 // evaluatorConfigDoc is the full top-level structure of the rendered
-// rule-evaluating Prometheus config.
+// promhash Prometheus config.
 type evaluatorConfigDoc struct {
-	Global       evaluatorGlobalDoc        `yaml:"global"`
-	RuleFiles    []string                  `yaml:"rule_files"`
+	Global       evaluatorGlobalDoc         `yaml:"global"`
+	RuleFiles    []string                   `yaml:"rule_files"`
 	ScrapeConfig []evaluatorScrapeConfigDoc `yaml:"scrape_configs"`
 	RemoteWrite  []evaluatorRemoteWriteDoc  `yaml:"remote_write"`
 }
 
-// SharedEvaluatorConfig renders ONE rule-evaluating Prometheus config that:
+// SharedEvaluatorConfig renders the promhash Prometheus config that:
 //   - stamps opts.TenantLabel as global.external_labels.tenant
-//   - scrapes opts.ScrapeTarget as a single static_configs target (job_name
-//     "promhash-evaluator"; never a per-app promhash-fed-* job; no honor_labels)
 //   - scrapes the mapping exposition (promhash_interface_app) from
 //     opts.MappingTarget (job_name "promhash-mapping") with honor_labels: true,
 //     so the mapping's identity labels (instance, ifIndex, iface) survive the
 //     scrape instead of being rewritten to the mapping server's address — the
 //     path-health joins depend on them
-//   - in JoinByComposite mode: synthesizes the iface label from [instance,
-//     ifIndex] via metric_relabel_configs (separator ":", regex "(.+)",
-//     replacement "${1}") on the counters job only (the mapping exposition
-//     already carries an explicit iface label)
-//   - loads path-health.rules.yaml via rule_files
-//   - remote_writes to opts.RemoteWriteURL
+//   - loads path-health.rules.yaml and path-health.alerts.yaml via rule_files
+//   - remote_writes the results to opts.RemoteWriteURL
 //
-// The returned string is valid rule-evaluating Prometheus YAML. It replaces the
-// old per-app federation/tenant scrape model.
+// The raw counters are NOT scraped: they arrive via remote_write from the main
+// Prometheus (receiver mode). Because remote-written samples are never
+// relabeled by the receiver, the config emits no relabel configuration at all;
+// with the ifname join key none is needed (the counters already carry
+// instance/ifName), and the composite join key is only usable when the SENDER
+// synthesizes the iface label at scrape time.
+//
+// The returned string is valid Prometheus YAML.
 func SharedEvaluatorConfig(opts EvaluatorOpts) string {
-	scrape := evaluatorScrapeConfigDoc{
-		JobName: "promhash-evaluator",
-		StaticConfigs: []evaluatorStaticConfigDoc{
-			{Targets: []string{opts.ScrapeTarget}},
-		},
-	}
-
-	if opts.JoinKey == JoinByComposite {
-		scrape.MetricRelabelConfigs = []evaluatorRelabelDoc{
-			{
-				SourceLabels: []string{"instance", "ifIndex"},
-				Separator:    ":",
-				TargetLabel:  "iface",
-				Regex:        "(.+)",
-				Replacement:  "${1}",
-			},
-		}
-	}
-
-	scrapes := []evaluatorScrapeConfigDoc{scrape}
+	scrapes := []evaluatorScrapeConfigDoc{}
 	if opts.MappingTarget != "" {
 		path := opts.MappingMetricsPath
 		if path == "" {
@@ -141,7 +117,7 @@ func SharedEvaluatorConfig(opts EvaluatorOpts) string {
 				"tenant": opts.TenantLabel,
 			},
 		},
-		RuleFiles:    []string{"path-health.rules.yaml"},
+		RuleFiles:    []string{RulesFileName, AlertsFileName},
 		ScrapeConfig: scrapes,
 		RemoteWrite:  []evaluatorRemoteWriteDoc{{URL: opts.RemoteWriteURL}},
 	}
