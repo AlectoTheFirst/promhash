@@ -445,7 +445,7 @@ metrics at `/metrics` (`promhash_alert_proxy_alerts_received_total`,
 
 A first-class Grafana datasource (`plugin/promhash-datasource`) that surfaces the graph through a proper query editor, template variables, and alerting. It is a thin adapter over the HTTP API — it does not talk to Neo4j directly, so all graph logic stays server-side.
 
-**Configuration:** one setting, the promhash API URL.
+**Configuration:** the promhash API URL, plus the API token (stored in Grafana's `secureJsonData` — encrypted at rest, decrypted only for the backend plugin, never sent to the browser). The token must be one accepted by `promhash-api`; a wrong or missing token shows up as an explicit 401 message in the datasource health check.
 
 **Query types:**
 

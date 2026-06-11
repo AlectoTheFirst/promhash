@@ -8,8 +8,11 @@ promhash HTTP API (C7). It has a Go backend (`pkg/`) and a React/TypeScript fron
 - `app_path` — resolve the candidate hop paths for an application.
 - `impact` — resolve the impacted apps/services for a device interface.
 
-The config editor exposes a single setting, **promhash API URL** (`jsonData.apiUrl`), which
-the backend uses to reach the C7 API.
+The config editor exposes two settings: **promhash API URL** (`jsonData.apiUrl`), which the
+backend uses to reach the C7 API, and **API token** (`secureJsonData.apiToken`) — the Bearer
+token presented on every upstream call. promhash-api requires a token unless it runs with
+`-insecure-no-auth`; a wrong or missing token surfaces as an explicit 401 message in the
+datasource health check.
 
 ## Build
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -92,7 +91,7 @@ func (d *Datasource) runQuery(ctx context.Context, q query) (*data.Frame, error)
 }
 
 func (d *Datasource) getJSON(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+path, nil)
+	req, err := d.newReq(ctx, path)
 	if err != nil {
 		return err
 	}

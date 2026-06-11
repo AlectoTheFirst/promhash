@@ -26,7 +26,7 @@ func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResource
 	default:
 		return sender.Send(&backend.CallResourceResponse{Status: http.StatusNotFound})
 	}
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+upstream, nil)
+	r, err := d.newReq(ctx, upstream)
 	if err != nil {
 		return err
 	}

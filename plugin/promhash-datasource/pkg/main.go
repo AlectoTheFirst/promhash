@@ -24,5 +24,7 @@ func newInstance(_ context.Context, s backend.DataSourceInstanceSettings) (insta
 		APIURL string `json:"apiUrl"`
 	}
 	_ = json.Unmarshal(s.JSONData, &cfg)
-	return plugin.NewDatasource(cfg.APIURL), nil
+	// The API token lives in secureJsonData: encrypted at rest, decrypted only
+	// for the backend, never sent to the browser.
+	return plugin.NewDatasource(cfg.APIURL, s.DecryptedSecureJSONData["apiToken"]), nil
 }
