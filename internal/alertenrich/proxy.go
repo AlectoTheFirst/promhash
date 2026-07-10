@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,6 +51,12 @@ var errAllUpstreams = errors.New("alertenrich: all upstream alertmanagers failed
 // are far smaller; anything bigger is a bug or abuse, and reading it
 // unbounded would let one client exhaust memory.
 const maxAlertBodyBytes = 8 << 20
+
+// maxConcurrentEnrich bounds in-flight impact lookups per batch. Serial
+// enrichment makes worst-case batch latency len(alerts)×Timeout — minutes
+// during exactly the alert storms the proxy exists for; the sender's
+// notification deadline is single-digit seconds.
+const maxConcurrentEnrich = 16
 
 // NewProxy builds a Proxy from cfg, applying defaults and registering metrics.
 func NewProxy(cfg ProxyConfig) *Proxy {
@@ -100,9 +107,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	p.m.received.Add(float64(len(alerts)))
 
+	sem := make(chan struct{}, maxConcurrentEnrich)
+	var wg sync.WaitGroup
 	for _, a := range alerts {
-		p.enrichOne(r.Context(), a)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(a rawAlert) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.enrichOne(r.Context(), a)
+		}(a)
 	}
+	wg.Wait()
 
 	out, err := marshalAlerts(alerts)
 	if err != nil {
