@@ -91,6 +91,38 @@ func (r *Repo) UpsertInterface(ctx context.Context, i Iface) error {
 			"observedAt": i.ObservedAt.Unix()})
 }
 
+// upsertBatchSize bounds how many interface rows travel in one UNWIND write,
+// keeping parameter payloads and transaction sizes moderate on large estates.
+const upsertBatchSize = 500
+
+// UpsertInterfaces performs the same per-row upsert as UpsertInterface for
+// every element of ifaces, batched via UNWIND so a full catalog sync costs
+// O(len/upsertBatchSize) round trips instead of one per interface.
+func (r *Repo) UpsertInterfaces(ctx context.Context, ifaces []Iface) error {
+	for start := 0; start < len(ifaces); start += upsertBatchSize {
+		end := min(start+upsertBatchSize, len(ifaces))
+		rows := make([]map[string]any, 0, end-start)
+		for _, i := range ifaces[start:end] {
+			rows = append(rows, map[string]any{
+				"phash": i.PHash, "device": i.Device, "ifName": i.IfName,
+				"metricIfName": i.MetricIfName, "ifDescr": i.IfDescr, "ifAlias": i.IfAlias,
+				"instance": i.Instance, "vendor": i.Vendor, "ifIndex": i.IfIndex,
+				"observedAt": i.ObservedAt.Unix()})
+		}
+		if err := r.write(ctx,
+			`UNWIND $rows AS row
+	         MERGE (n:Interface {phash:row.phash})
+	         SET n.device=row.device, n.ifName=row.ifName, n.metricIfName=row.metricIfName,
+	             n.ifDescr=row.ifDescr, n.ifAlias=row.ifAlias, n.instance=row.instance,
+	             n.vendor=row.vendor, n.ifIndex=row.ifIndex, n.observedAt=row.observedAt,
+	             n.provenance='observed'`,
+			map[string]any{"rows": rows}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetInterfaceByPHash returns the Interface identified by phash. It returns
 // ErrNotFound if no such interface exists.
 func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, error) {
