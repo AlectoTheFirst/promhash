@@ -582,8 +582,10 @@ func (r *Repo) ListOpenDeclaredApps(ctx context.Context) ([]string, error) {
 
 // AppServiceNames returns app-name → service-name for every app in apps that
 // has a RUNS_AS service. Apps without one are absent from the map; callers
-// fall back to the app name. When an app has multiple RUNS_AS services the
-// last row wins (mirrors the LIMIT 1 of the former per-app lookup).
+// fall back to the app name. When an app has multiple RUNS_AS services an
+// arbitrary one wins — neither this query nor the former per-app LIMIT 1
+// lookup orders the rows, and the data model treats multiple services per
+// app as unusual.
 func (r *Repo) AppServiceNames(ctx context.Context, apps []string) (map[string]string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
 		`UNWIND $apps AS app

@@ -50,6 +50,10 @@ func buildIfaces(rows []promclient.IfaceRow, devByInstance map[string]string, ve
 		}
 		if raw == "" {
 			raw = row.Instance
+			// A malformed instance (SplitHostPort error) deliberately falls
+			// through with the raw value: SafeKey below rejects anything
+			// still carrying ':', so it degrades to a skip+warning rather
+			// than a bad device name.
 			if host, _, err := net.SplitHostPort(raw); err == nil {
 				raw = host
 			}
