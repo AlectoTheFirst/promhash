@@ -302,11 +302,17 @@ func depsToParams(svcPHash string, deps []DeclaredDep, source string, validFrom 
 // Connection closes. Reusing a chained WITH would drop cardinality to zero
 // whenever a dependency has no open TAKES, leaving stale-open edges that a
 // reload could no longer supersede.
+//
+// The close clamps to validFrom+1 when at is not after validFrom, so an
+// out-of-order timestamp (non-monotonic commit times, mixed manual/CI runs)
+// can never produce an inverted [validFrom, validTo) window.
 func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHash string, at time.Time) error {
 	res, err := tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
-         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at`,
+         WHERE t.validTo IS NULL
+         SET t.validTo = CASE WHEN $at > t.validFrom THEN $at ELSE t.validFrom + 1 END,
+             conn.validTo = CASE WHEN $at > conn.validFrom THEN $at ELSE conn.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
@@ -317,7 +323,8 @@ func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHa
 	res, err = tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[:USES]->(conn:Connection)
-         WHERE conn.validTo IS NULL SET conn.validTo=$at`,
+         WHERE conn.validTo IS NULL
+         SET conn.validTo = CASE WHEN $at > conn.validFrom THEN $at ELSE conn.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
@@ -328,7 +335,8 @@ func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHa
 	res, err = tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[do:DEPENDS_ON]->()
-         WHERE do.validTo IS NULL SET do.validTo=$at`,
+         WHERE do.validTo IS NULL
+         SET do.validTo = CASE WHEN $at > do.validFrom THEN $at ELSE do.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
