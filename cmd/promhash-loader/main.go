@@ -25,12 +25,13 @@ func main() {
 }
 
 func run() error {
-	var dir, neoURL, neoUser, neoPass, sha, commitTimeStr string
+	var dir, neoURL, neoUser, neoPass, neoDB, sha, commitTimeStr string
 	var validateOnly, allowEmpty bool
 	flag.StringVar(&dir, "dir", "declared", "directory of *.yaml declarations")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&neoDB, "neo4j-db", "neo4j", "Neo4j database name")
 	flag.StringVar(&sha, "source", "manual", "git sha for provenance")
 	flag.StringVar(&commitTimeStr, "commit-time", "", "RFC3339 git commit time to use as validFrom base (overrides GIT_COMMIT_TIME env)")
 	flag.BoolVar(&validateOnly, "validate-only", false, "CI gate: validate, do not write")
@@ -66,7 +67,7 @@ func run() error {
 	if err := drv.VerifyConnectivity(ctx); err != nil {
 		return err
 	}
-	r := graph.New(drv, "neo4j")
+	r := graph.New(drv, neoDB)
 	// The loader creates Application/ApplicationService/... nodes, so the
 	// uniqueness constraints must exist before any write. Skipped in
 	// validate-only mode, which must not write anything (including schema).

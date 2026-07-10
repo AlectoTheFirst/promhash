@@ -23,10 +23,11 @@ func main() {
 }
 
 func run() error {
-	var neoURL, neoUser, neoPass, snURL, snUser, snPass string
+	var neoURL, neoUser, neoPass, neoDB, snURL, snUser, snPass string
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&neoDB, "neo4j-db", "neo4j", "Neo4j database name")
 	flag.StringVar(&snURL, "servicenow", "", "")
 	flag.StringVar(&snUser, "servicenow-user", "", "")
 	flag.StringVar(&snPass, "servicenow-pass", "", "")
@@ -46,7 +47,7 @@ func run() error {
 	if err := drv.VerifyConnectivity(ctx); err != nil {
 		return err
 	}
-	r := graph.New(drv, "neo4j")
+	r := graph.New(drv, neoDB)
 	if err := r.EnsureConstraints(ctx); err != nil {
 		return fmt.Errorf("ensure constraints: %w", err)
 	}

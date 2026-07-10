@@ -1,12 +1,15 @@
 package alertenrich
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,5 +284,94 @@ func TestProxyResolvedKeepsLabelsDropsAnnotation(t *testing.T) {
 	}
 	if _, found := out[0]["annotations"].(map[string]any)["promhash_blast_radius"]; found {
 		t.Fatal("resolved annotation must be omitted when EnrichResolved is false")
+	}
+}
+
+func TestServeHTTPRejectsOversizedBody(t *testing.T) {
+	forwarded := false
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = true
+	}))
+	defer up.Close()
+
+	p := NewProxy(ProxyConfig{
+		Client:     fakeClient{},
+		Upstreams:  []string{up.URL},
+		LabelMap:   LabelMap{DeviceLabel: "instance", IfIndexLabel: "ifIndex", IfNameLabel: "ifName"},
+		Render:     RenderCfg{Prefix: "promhash_"},
+		Registerer: prometheus.NewRegistry(),
+	})
+
+	big := bytes.Repeat([]byte("a"), maxAlertBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewReader(big))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if forwarded {
+		t.Fatal("oversized batch must not be forwarded upstream")
+	}
+}
+
+// concurrencyClient records the maximum number of in-flight lookups.
+type concurrencyClient struct {
+	cur, max atomic.Int64
+}
+
+func (c *concurrencyClient) observe() func() {
+	n := c.cur.Add(1)
+	for {
+		m := c.max.Load()
+		if n <= m || c.max.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	return func() { c.cur.Add(-1) }
+}
+
+func (c *concurrencyClient) ImpactByInstanceIndex(_ context.Context, _ string, _ int, _ time.Time) ([]graph.ImpactRow, error) {
+	defer c.observe()()
+	return []graph.ImpactRow{{App: "a", Service: "s", Owner: "o"}}, nil
+}
+
+func (c *concurrencyClient) ImpactByName(_ context.Context, _, _ string, _ time.Time) ([]graph.ImpactRow, error) {
+	defer c.observe()()
+	return []graph.ImpactRow{{App: "a", Service: "s", Owner: "o"}}, nil
+}
+
+func TestServeHTTPEnrichesConcurrently(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+
+	client := &concurrencyClient{}
+	p := NewProxy(ProxyConfig{
+		Client:     client,
+		Upstreams:  []string{up.URL},
+		LabelMap:   LabelMap{DeviceLabel: "instance", IfIndexLabel: "ifIndex", IfNameLabel: "ifName"},
+		Render:     RenderCfg{Prefix: "promhash_"},
+		Registerer: prometheus.NewRegistry(),
+	})
+
+	// 8 distinct correlatable alerts.
+	var batch []map[string]any
+	for i := 0; i < 8; i++ {
+		batch = append(batch, map[string]any{
+			"labels":   map[string]string{"alertname": "IfDown", "instance": fmt.Sprintf("10.0.0.%d:9116", i), "ifIndex": "1"},
+			"startsAt": "2026-07-10T00:00:00Z",
+		})
+	}
+	body, _ := json.Marshal(batch)
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := client.max.Load(); got < 2 {
+		t.Fatalf("max concurrent lookups = %d, want >= 2 (serial enrichment)", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,6 +47,17 @@ type Proxy struct {
 // errAllUpstreams indicates no upstream Alertmanager accepted the batch.
 var errAllUpstreams = errors.New("alertenrich: all upstream alertmanagers failed")
 
+// maxAlertBodyBytes caps the accepted POST body. Real Alertmanager batches
+// are far smaller; anything bigger is a bug or abuse, and reading it
+// unbounded would let one client exhaust memory.
+const maxAlertBodyBytes = 8 << 20
+
+// maxConcurrentEnrich bounds in-flight impact lookups per batch. Serial
+// enrichment makes worst-case batch latency len(alerts)×Timeout — minutes
+// during exactly the alert storms the proxy exists for; the sender's
+// notification deadline is single-digit seconds.
+const maxConcurrentEnrich = 16
+
 // NewProxy builds a Proxy from cfg, applying defaults and registering metrics.
 func NewProxy(cfg ProxyConfig) *Proxy {
 	if cfg.Timeout == 0 {
@@ -77,8 +89,14 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 // ServeHTTP handles POST /api/v2/alerts: parse, enrich each alert (fail-open),
 // then forward the batch to all upstream Alertmanagers.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAlertBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "alert payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
@@ -89,9 +107,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	p.m.received.Add(float64(len(alerts)))
 
+	sem := make(chan struct{}, maxConcurrentEnrich)
+	var wg sync.WaitGroup
 	for _, a := range alerts {
-		p.enrichOne(r.Context(), a)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(a rawAlert) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.enrichOne(r.Context(), a)
+		}(a)
 	}
+	wg.Wait()
 
 	out, err := marshalAlerts(alerts)
 	if err != nil {

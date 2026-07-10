@@ -91,6 +91,38 @@ func (r *Repo) UpsertInterface(ctx context.Context, i Iface) error {
 			"observedAt": i.ObservedAt.Unix()})
 }
 
+// upsertBatchSize bounds how many interface rows travel in one UNWIND write,
+// keeping parameter payloads and transaction sizes moderate on large estates.
+const upsertBatchSize = 500
+
+// UpsertInterfaces performs the same per-row upsert as UpsertInterface for
+// every element of ifaces, batched via UNWIND so a full catalog sync costs
+// O(len/upsertBatchSize) round trips instead of one per interface.
+func (r *Repo) UpsertInterfaces(ctx context.Context, ifaces []Iface) error {
+	for start := 0; start < len(ifaces); start += upsertBatchSize {
+		end := min(start+upsertBatchSize, len(ifaces))
+		rows := make([]map[string]any, 0, end-start)
+		for _, i := range ifaces[start:end] {
+			rows = append(rows, map[string]any{
+				"phash": i.PHash, "device": i.Device, "ifName": i.IfName,
+				"metricIfName": i.MetricIfName, "ifDescr": i.IfDescr, "ifAlias": i.IfAlias,
+				"instance": i.Instance, "vendor": i.Vendor, "ifIndex": i.IfIndex,
+				"observedAt": i.ObservedAt.Unix()})
+		}
+		if err := r.write(ctx,
+			`UNWIND $rows AS row
+	         MERGE (n:Interface {phash:row.phash})
+	         SET n.device=row.device, n.ifName=row.ifName, n.metricIfName=row.metricIfName,
+	             n.ifDescr=row.ifDescr, n.ifAlias=row.ifAlias, n.instance=row.instance,
+	             n.vendor=row.vendor, n.ifIndex=row.ifIndex, n.observedAt=row.observedAt,
+	             n.provenance='observed'`,
+			map[string]any{"rows": rows}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetInterfaceByPHash returns the Interface identified by phash. It returns
 // ErrNotFound if no such interface exists.
 func (r *Repo) GetInterfaceByPHash(ctx context.Context, phash string) (Iface, error) {
@@ -302,11 +334,17 @@ func depsToParams(svcPHash string, deps []DeclaredDep, source string, validFrom 
 // Connection closes. Reusing a chained WITH would drop cardinality to zero
 // whenever a dependency has no open TAKES, leaving stale-open edges that a
 // reload could no longer supersede.
+//
+// The close clamps to validFrom+1 when at is not after validFrom, so an
+// out-of-order timestamp (non-monotonic commit times, mixed manual/CI runs)
+// can never produce an inverted [validFrom, validTo) window.
 func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHash string, at time.Time) error {
 	res, err := tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[:USES]->(conn:Connection)-[t:TAKES]->(:Path)
-         WHERE t.validTo IS NULL SET t.validTo=$at, conn.validTo=$at`,
+         WHERE t.validTo IS NULL
+         SET t.validTo = CASE WHEN $at > t.validFrom THEN $at ELSE t.validFrom + 1 END,
+             conn.validTo = CASE WHEN $at > conn.validFrom THEN $at ELSE conn.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
@@ -317,7 +355,8 @@ func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHa
 	res, err = tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[:USES]->(conn:Connection)
-         WHERE conn.validTo IS NULL SET conn.validTo=$at`,
+         WHERE conn.validTo IS NULL
+         SET conn.validTo = CASE WHEN $at > conn.validFrom THEN $at ELSE conn.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
@@ -328,7 +367,8 @@ func closeAppValidityTx(ctx context.Context, tx neo4j.ManagedTransaction, appPHa
 	res, err = tx.Run(ctx,
 		`MATCH (:Application {phash:$appPHash})-[:RUNS_AS]->(svc:ApplicationService)
          MATCH (svc)-[do:DEPENDS_ON]->()
-         WHERE do.validTo IS NULL SET do.validTo=$at`,
+         WHERE do.validTo IS NULL
+         SET do.validTo = CASE WHEN $at > do.validFrom THEN $at ELSE do.validFrom + 1 END`,
 		map[string]any{"appPHash": appPHash, "at": at.Unix()})
 	if err != nil {
 		return err
@@ -354,20 +394,25 @@ func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Ti
 // from current state.
 //
 // To prevent zero-width validity windows ([T,T) which no point-in-time query
-// can satisfy), the effective timestamp is bumped to prevValidFrom+1s when the
-// requested at falls within the same second as the app's current open
-// validFrom. Both the close and the new upsert use this effective time so the
-// timeline stays contiguous (old.validTo == new.validFrom) and strictly
-// increasing. The read of the current max validFrom happens inside the same
-// managed transaction as the writes, so the check-then-act is atomic.
+// can satisfy) and overlaps with closed history, the effective timestamp is
+// bumped to prev+1s whenever the requested at is not strictly after the latest
+// instant any of the app's declared edges has touched — open edges via
+// validFrom, closed edges via validTo. A reload after a retraction therefore
+// also lands strictly after all history; this leaves a deliberate 1-second
+// retracted gap between a close at T and a re-declaration bumped to T+1. Both
+// the close and the new upsert use this effective time so the timeline stays
+// contiguous (old.validTo == new.validFrom) and strictly increasing. The read
+// of the current maximum happens inside the same managed transaction as the
+// writes, so the check-then-act is atomic.
 func (r *Repo) ReloadDeclaredApp(ctx context.Context, d DeclaredApp, at time.Time) error {
 	return r.execWrite(ctx, func(tx neo4j.ManagedTransaction) error {
-		// Read the app's current maximum open validFrom within this transaction
-		// so the monotonicity check and the writes are one atomic operation.
+		// Read the latest instant any declared edge has touched — open edges
+		// contribute validFrom, closed edges contribute validTo — within this
+		// transaction so the monotonicity check and the writes are one atomic
+		// operation.
 		res, err := tx.Run(ctx,
 			`MATCH (app:Application {phash:$p})-[:RUNS_AS]->(:ApplicationService)-[do:DEPENDS_ON]->()
-			 WHERE do.validTo IS NULL
-			 RETURN max(do.validFrom) AS prev`,
+			 RETURN max(coalesce(do.validTo, do.validFrom)) AS prev`,
 			map[string]any{"p": d.AppPHash})
 		if err != nil {
 			return err
@@ -535,17 +580,27 @@ func (r *Repo) ListOpenDeclaredApps(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// AppServiceName returns the name of the ApplicationService that the named
-// application runs as. If the application has no service or the lookup fails,
-// it falls back to returning app unchanged.
-func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
+// AppServiceNames returns app-name → service-name for every app in apps that
+// has a RUNS_AS service. Apps without one are absent from the map; callers
+// fall back to the app name. When an app has multiple RUNS_AS services the
+// last row wins (mirrors the LIMIT 1 of the former per-app lookup).
+func (r *Repo) AppServiceNames(ctx context.Context, apps []string) (map[string]string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
-		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
-		map[string]any{"app": app}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
-	if err != nil || len(res.Records) == 0 {
-		return app, err
+		`UNWIND $apps AS app
+	     MATCH (:Application {name:app})-[:RUNS_AS]->(s:ApplicationService)
+	     RETURN app, s.name AS svc`,
+		map[string]any{"apps": apps},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
 	}
-	v, _ := res.Records[0].Get("n")
-	s, _ := v.(string)
-	return s, nil
+	out := make(map[string]string, len(res.Records))
+	for _, rec := range res.Records {
+		a, _ := rec.Get("app")
+		s, _ := rec.Get("svc")
+		app, _ := a.(string)
+		svc, _ := s.(string)
+		out[app] = svc
+	}
+	return out, nil
 }

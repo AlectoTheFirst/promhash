@@ -26,19 +26,20 @@ func main() {
 
 func run() error {
 	var (
-		neoURL, neoUser, neoPass string
-		outDir, allowlist        string
-		apiTarget                string
-		mappingPath              string
-		apiTokenFile             string
-		remoteWriteURL           string
-		tenantLabel              string
-		joinKeyStr               string
-		pruneLegacy              bool
+		neoURL, neoUser, neoPass, neoDB string
+		outDir, allowlist               string
+		apiTarget                       string
+		mappingPath                     string
+		apiTokenFile                    string
+		remoteWriteURL                  string
+		tenantLabel                     string
+		joinKeyStr                      string
+		pruneLegacy                     bool
 	)
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&neoDB, "neo4j-db", "neo4j", "Neo4j database name")
 	flag.StringVar(&outDir, "out", "gitops/enrichment", "output dir for artifacts")
 	flag.StringVar(&allowlist, "apps", "", "comma-separated curated app names")
 	flag.StringVar(&apiTarget, "promhash-api", "", "host:port of the promhash-api serving the live GET /mapping.prom exposition")
@@ -72,7 +73,7 @@ func run() error {
 	if err := drv.VerifyConnectivity(ctx); err != nil {
 		return err
 	}
-	r := graph.New(drv, "neo4j")
+	r := graph.New(drv, neoDB)
 
 	apps := make(map[string][]graph.Hop)
 

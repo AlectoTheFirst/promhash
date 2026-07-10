@@ -39,9 +39,9 @@ type Repo interface {
 	InterfaceImpactByInstanceIndex(ctx context.Context, instance string, ifIndex int, at time.Time) ([]graph.ImpactRow, error)
 	// ListApps returns the identifiers of all known applications.
 	ListApps(ctx context.Context) ([]string, error)
-	// AppServiceName returns the application-service name an application runs
-	// as (falling back to the app name itself when none is recorded).
-	AppServiceName(ctx context.Context, app string) (string, error)
+	// AppServiceNames returns app -> service name for the given apps; apps
+	// with no recorded service are absent (callers fall back to the app name).
+	AppServiceNames(ctx context.Context, apps []string) (map[string]string, error)
 	// ListAllInterfaces returns every known interface, used by lookupImpact to
 	// build a catalog.Resolver that maps raw query params to canonical phashes.
 	ListAllInterfaces(ctx context.Context) ([]graph.Iface, error)
@@ -179,15 +179,27 @@ func (s *Server) mappingProm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "apps query parameter is required (comma-separated curated app names)", http.StatusBadRequest)
 		return
 	}
+	var apps []string
+	for _, app := range strings.Split(appsParam, ",") {
+		if app = strings.TrimSpace(app); app != "" {
+			apps = append(apps, app)
+		}
+	}
+	// One batched name lookup per scrape instead of one query per app.
+	svcNames, err := s.repo.AppServiceNames(r.Context(), apps)
+	if err != nil {
+		log.Printf("api: mapping AppServiceNames: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	t := time.Now()
 	var points []enrich.MappingPoint
-	for _, app := range strings.Split(appsParam, ",") {
-		app = strings.TrimSpace(app)
-		if app == "" {
-			continue
-		}
+	for _, app := range apps {
 		hops, err := s.repo.AppPath(r.Context(), phash.Hash(phash.KindApp, app), t)
 		if err != nil {
+			// Deliberately fail-closed for the WHOLE exposition: partial output
+			// would silently drop apps (mis-attribution); an error surfaces as a
+			// failed scrape, which PromhashMappingAbsent/ScrapeDown page on.
 			log.Printf("api: mapping AppPath(%s): %v", app, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -195,11 +207,9 @@ func (s *Server) mappingProm(w http.ResponseWriter, r *http.Request) {
 		if len(hops) == 0 {
 			continue
 		}
-		svc, err := s.repo.AppServiceName(r.Context(), app)
-		if err != nil {
-			log.Printf("api: mapping AppServiceName(%s): %v", app, err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+		svc, ok := svcNames[app]
+		if !ok {
+			svc = app
 		}
 		points = append(points, enrich.MappingSeries(app, svc, hops, enrich.JoinByIfName)...)
 	}

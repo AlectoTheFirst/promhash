@@ -292,7 +292,7 @@ Interface references are validated against reality. On a pull request, `promhash
 
 ## Command-line tools
 
-All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
+All tools share the Neo4j connection flags `-neo4j`, `-neo4j-user`, and `-neo4j-db` (default `neo4j`).
 
 **Secrets.** To keep credentials out of process listings, each tool reads its secret from the environment: `NEO4J_PASS` (all tools), `NAUTOBOT_TOKEN` (`promhash-catalog`), `SERVICENOW_PASS` (`promhash-seed`), `PROMHASH_API_TOKENS` (`promhash-api`, the accepted Bearer tokens), and `PROMHASH_API_TOKEN` (`promhash-alert-proxy`, the token it presents). Always use the environment variables; never pass secrets as flags.
 
@@ -300,7 +300,7 @@ All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
 
 Harvests the real interface inventory from Prometheus, upserting `Interface` nodes that carry the actual metric labels and current `ifIndex`. This is the normalization layer that lets declarations use human interface names. Run it on a schedule.
 
-Device names come from the `-device-label` series label (default `hostname`, the label your `file_sd` target files stamp on every target). Precedence per interface: device label first, then the optional Nautobot instance-to-device map, then the raw `instance` value as a last resort. Nautobot is an optional naming fallback for environments whose targets carry no hostname-style label.
+Device names come from the `-device-label` series label (default `hostname`, the label your `file_sd` target files stamp on every target). Precedence per interface: device label first, then the optional Nautobot instance-to-device map, then the host part of the raw `instance` value as a last resort. Nautobot is an optional naming fallback for environments whose targets carry no hostname-style label.
 
 ```
 -prometheus      Prometheus base URL                 (default http://localhost:9090)

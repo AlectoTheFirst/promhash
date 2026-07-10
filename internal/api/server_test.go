@@ -46,8 +46,12 @@ func (fakeRepo) InterfaceImpactByInstanceIndex(_ context.Context, _ string, _ in
 	return []graph.ImpactRow{{App: "payments", Service: "payments-api"}}, nil
 }
 func (fakeRepo) ListApps(_ context.Context) ([]string, error) { return []string{"payments"}, nil }
-func (fakeRepo) AppServiceName(_ context.Context, app string) (string, error) {
-	return app + "-api", nil
+func (fakeRepo) AppServiceNames(_ context.Context, apps []string) (map[string]string, error) {
+	out := make(map[string]string, len(apps))
+	for _, app := range apps {
+		out[app] = app + "-api"
+	}
+	return out, nil
 }
 func (fakeRepo) ListAllInterfaces(_ context.Context) ([]graph.Iface, error) {
 	return testIfaces(), nil
@@ -741,5 +745,34 @@ func TestMappingPromSkipsPathlessApps(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "" {
 		t.Fatalf("expected empty exposition for pathless app, got %q", body)
+	}
+}
+
+// countingRepo embeds fakeRepo and counts AppServiceNames calls, proving
+// mappingProm issues one batched lookup per request rather than one per app.
+type countingRepo struct {
+	fakeRepo
+	serviceNameCalls int
+}
+
+func (r *countingRepo) AppServiceNames(ctx context.Context, apps []string) (map[string]string, error) {
+	r.serviceNameCalls++
+	return r.fakeRepo.AppServiceNames(ctx, apps)
+}
+
+// TestMappingPromBatchesServiceNames asserts /mapping.prom issues exactly one
+// AppServiceNames call per request regardless of how many apps are named,
+// replacing the former per-app name lookup.
+func TestMappingPromBatchesServiceNames(t *testing.T) {
+	repo := &countingRepo{}
+	srv := NewServer(repo)
+	req := httptest.NewRequest(http.MethodGet, "/mapping.prom?apps=a1,a2,a3", nil)
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if repo.serviceNameCalls != 1 {
+		t.Fatalf("AppServiceNames called %d times, want 1", repo.serviceNameCalls)
 	}
 }

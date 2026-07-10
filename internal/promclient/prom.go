@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"sort"
 	"strconv"
 	"time"
 
@@ -27,18 +26,6 @@ import (
 type IfaceRow struct {
 	Instance, Device, IfName, IfDescr, IfAlias string
 	IfIndex                                    int
-}
-
-// CapRow holds the interface capacity and operational status for a single
-// interface as harvested from Prometheus. SpeedMbps comes from ifHighSpeed
-// and OperStatus from ifOperStatus (1=up, 2=down per RFC 2863).
-// A row is present if the interface appears in either metric; OperStatus
-// defaults to 0 when absent from ifOperStatus.
-type CapRow struct {
-	Instance   string
-	IfIndex    int
-	SpeedMbps  float64
-	OperStatus float64
 }
 
 // Client wraps a Prometheus HTTP API for harvesting interface metadata.
@@ -171,81 +158,5 @@ func (c *Client) HarvestInterfaces(ctx context.Context, deviceLabel string) (row
 			Instance: string(s.Metric["instance"]), Device: dev, IfName: string(s.Metric["ifName"]),
 			IfDescr: string(s.Metric["ifDescr"]), IfAlias: string(s.Metric["ifAlias"]), IfIndex: idx})
 	}
-	return out, skipped, nil
-}
-
-const capSpeedQuery = `max by(instance, ifIndex)(ifHighSpeed)`
-const capStatusQuery = `max by(instance, ifIndex)(ifOperStatus)`
-
-// capKey is a composite map key for (instance, ifIndex) used during the
-// outer-join merge in CapacityStatus.
-type capKey struct {
-	instance string
-	ifIndex  int
-}
-
-// CapacityStatus queries Prometheus for interface capacity (ifHighSpeed) and
-// operational status (ifOperStatus) and returns one CapRow per interface.
-// The result is an outer join: an interface present in ifHighSpeed but absent
-// from ifOperStatus still returns a CapRow with OperStatus==0, and vice-versa.
-// Rows with a non-numeric ifIndex label are skipped (counted in skipped).
-// The returned slice is always non-nil and sorted by (Instance, IfIndex).
-func (c *Client) CapacityStatus(ctx context.Context) (rows []CapRow, skipped int, err error) {
-	speedVec, err := c.queryVector(ctx, capSpeedQuery)
-	if err != nil {
-		return nil, 0, err
-	}
-	statusVec, err := c.queryVector(ctx, capStatusQuery)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	merged := make(map[capKey]*CapRow)
-
-	for _, s := range speedVec {
-		idxStr := string(s.Metric["ifIndex"])
-		if idxStr == "" {
-			// absent ifIndex treated as 0, consistent with HarvestInterfaces
-			idxStr = "0"
-		}
-		idx, perr := strconv.Atoi(idxStr)
-		if perr != nil {
-			skipped++
-			continue
-		}
-		k := capKey{instance: string(s.Metric["instance"]), ifIndex: idx}
-		if _, exists := merged[k]; !exists {
-			merged[k] = &CapRow{Instance: k.instance, IfIndex: idx}
-		}
-		merged[k].SpeedMbps = float64(s.Value)
-	}
-
-	for _, s := range statusVec {
-		idxStr := string(s.Metric["ifIndex"])
-		if idxStr == "" {
-			idxStr = "0"
-		}
-		idx, perr := strconv.Atoi(idxStr)
-		if perr != nil {
-			skipped++
-			continue
-		}
-		k := capKey{instance: string(s.Metric["instance"]), ifIndex: idx}
-		if _, exists := merged[k]; !exists {
-			merged[k] = &CapRow{Instance: k.instance, IfIndex: idx}
-		}
-		merged[k].OperStatus = float64(s.Value)
-	}
-
-	out := make([]CapRow, 0, len(merged))
-	for _, r := range merged {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Instance != out[j].Instance {
-			return out[i].Instance < out[j].Instance
-		}
-		return out[i].IfIndex < out[j].IfIndex
-	})
 	return out, skipped, nil
 }
