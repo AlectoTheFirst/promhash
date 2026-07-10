@@ -300,7 +300,7 @@ All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
 
 Harvests the real interface inventory from Prometheus, upserting `Interface` nodes that carry the actual metric labels and current `ifIndex`. This is the normalization layer that lets declarations use human interface names. Run it on a schedule.
 
-Device names come from the `-device-label` series label (default `hostname`, the label your `file_sd` target files stamp on every target). Precedence per interface: device label first, then the optional Nautobot instance-to-device map, then the raw `instance` value as a last resort. Nautobot is an optional naming fallback for environments whose targets carry no hostname-style label.
+Device names come from the `-device-label` series label (default `hostname`, the label your `file_sd` target files stamp on every target). Precedence per interface: device label first, then the optional Nautobot instance-to-device map, then the host part of the raw `instance` value as a last resort. Nautobot is an optional naming fallback for environments whose targets carry no hostname-style label.
 
 ```
 -prometheus      Prometheus base URL                 (default http://localhost:9090)
