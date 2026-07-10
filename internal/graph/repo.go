@@ -362,20 +362,25 @@ func (r *Repo) CloseAppValidity(ctx context.Context, appPHash string, at time.Ti
 // from current state.
 //
 // To prevent zero-width validity windows ([T,T) which no point-in-time query
-// can satisfy), the effective timestamp is bumped to prevValidFrom+1s when the
-// requested at falls within the same second as the app's current open
-// validFrom. Both the close and the new upsert use this effective time so the
-// timeline stays contiguous (old.validTo == new.validFrom) and strictly
-// increasing. The read of the current max validFrom happens inside the same
-// managed transaction as the writes, so the check-then-act is atomic.
+// can satisfy) and overlaps with closed history, the effective timestamp is
+// bumped to prev+1s whenever the requested at is not strictly after the latest
+// instant any of the app's declared edges has touched — open edges via
+// validFrom, closed edges via validTo. A reload after a retraction therefore
+// also lands strictly after all history; this leaves a deliberate 1-second
+// retracted gap between a close at T and a re-declaration bumped to T+1. Both
+// the close and the new upsert use this effective time so the timeline stays
+// contiguous (old.validTo == new.validFrom) and strictly increasing. The read
+// of the current maximum happens inside the same managed transaction as the
+// writes, so the check-then-act is atomic.
 func (r *Repo) ReloadDeclaredApp(ctx context.Context, d DeclaredApp, at time.Time) error {
 	return r.execWrite(ctx, func(tx neo4j.ManagedTransaction) error {
-		// Read the app's current maximum open validFrom within this transaction
-		// so the monotonicity check and the writes are one atomic operation.
+		// Read the latest instant any declared edge has touched — open edges
+		// contribute validFrom, closed edges contribute validTo — within this
+		// transaction so the monotonicity check and the writes are one atomic
+		// operation.
 		res, err := tx.Run(ctx,
 			`MATCH (app:Application {phash:$p})-[:RUNS_AS]->(:ApplicationService)-[do:DEPENDS_ON]->()
-			 WHERE do.validTo IS NULL
-			 RETURN max(do.validFrom) AS prev`,
+			 RETURN max(coalesce(do.validTo, do.validFrom)) AS prev`,
 			map[string]any{"p": d.AppPHash})
 		if err != nil {
 			return err

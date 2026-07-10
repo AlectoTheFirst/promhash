@@ -84,3 +84,57 @@ func TestCloseValidityClampsToValidFrom(t *testing.T) {
 		t.Fatalf("AppPath(t10+1): want 0 hops after close, got %d", len(hops))
 	}
 }
+
+// TestReloadAfterRetractionNoOverlap verifies that re-declaring an app with a
+// timestamp EARLIER than its retraction does not open a window overlapping the
+// closed history: no single instant may return hops from two revisions.
+func TestReloadAfterRetractionNoOverlap(t *testing.T) {
+	ctx := context.Background()
+	drv, cleanup := testutil.Neo4j(t, ctx)
+	defer cleanup()
+	r := New(drv, "neo4j")
+	_ = r.EnsureConstraints(ctx)
+
+	seedIface(t, ctx, r, "interface:ovl-a", "rtr-ovl-a", "te0/0/1")
+	seedIface(t, ctx, r, "interface:ovl-b", "rtr-ovl-b", "te0/0/2")
+
+	t0 := time.Unix(1700000000, 0).UTC()
+	t1 := time.Unix(1700001000, 0).UTC()
+	t2 := time.Unix(1700002000, 0).UTC()
+
+	d1 := buildReloadApp(t1, "interface:ovl-a", "rtr-ovl-a")
+	d1.AppPHash, d1.App = "application:ovl-test", "ovl-test"
+	d1.AppSvcPHash, d1.AppSvc = "appservice:ovl-test", "ovl-test"
+	if err := r.ReloadDeclaredApp(ctx, d1, t1); err != nil {
+		t.Fatalf("load rev1: %v", err)
+	}
+	if err := r.CloseAppValidity(ctx, d1.AppPHash, t2); err != nil {
+		t.Fatalf("retract: %v", err)
+	}
+
+	// Re-declare with a hop change and an OUT-OF-ORDER timestamp t0 < t1 < t2.
+	d2 := buildReloadApp(t0, "interface:ovl-b", "rtr-ovl-b")
+	d2.AppPHash, d2.App = "application:ovl-test", "ovl-test"
+	d2.AppSvcPHash, d2.AppSvc = "appservice:ovl-test", "ovl-test"
+	if err := r.ReloadDeclaredApp(ctx, d2, t0); err != nil {
+		t.Fatalf("reload rev2: %v", err)
+	}
+
+	// Mid-first-window: only revision 1's hop.
+	hops, err := r.AppPath(ctx, d1.AppPHash, t1.Add(time.Second))
+	if err != nil {
+		t.Fatalf("AppPath(t1+1): %v", err)
+	}
+	if len(hops) != 1 || hops[0].Device != "rtr-ovl-a" {
+		t.Fatalf("AppPath(t1+1): want exactly rev1 hop (rtr-ovl-a), got %+v", hops)
+	}
+
+	// Well after the retraction: only revision 2's hop.
+	hops, err = r.AppPath(ctx, d1.AppPHash, t2.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("AppPath(t2+1h): %v", err)
+	}
+	if len(hops) != 1 || hops[0].Device != "rtr-ovl-b" {
+		t.Fatalf("AppPath(t2+1h): want exactly rev2 hop (rtr-ovl-b), got %+v", hops)
+	}
+}
