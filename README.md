@@ -22,7 +22,7 @@ The infrastructure metrics are never tagged with an `app` label. The relationshi
 - [Command-line tools](#command-line-tools)
 - [HTTP API](#http-api)
 - [Alert enrichment proxy](#alert-enrichment-proxy)
-- [Grafana datasource plugin](#grafana-datasource-plugin)
+- [Grafana dashboards](#grafana-dashboards)
 - [Enrichment and projection](#enrichment-and-projection)
 - [How-to recipes](#how-to-recipes)
 - [Codebase reference](#codebase-reference)
@@ -74,14 +74,14 @@ flowchart TB
 
     subgraph serving["Serving"]
         api["promhash-api<br/>(Bearer auth, TLS)"]
-        plugin["Grafana datasource plugin:<br/>app picker, path/impact panels"]
+        grafana["Grafana dashboards<br/>(JSON API datasource):<br/>app picker, path/impact panels"]
         proxy["promhash-alert-proxy"]
         am["Alertmanager"]
     end
 
     neo --> api
     api -- "scrape GET /mapping.prom<br/>(live mapping series)" --> pprom
-    api --> plugin
+    api --> grafana
     api --> proxy
     mainprom -- "firing alerts" --> proxy
     proxy -- "alerts + blast radius" --> am
@@ -92,7 +92,7 @@ The lifecycle, in order:
 1. **Sync.** `promhash-catalog` runs on a schedule and harvests the real interface inventory (`ifName`, `ifDescr`, `ifAlias`, `ifIndex`) plus the `hostname` target label from the main Prometheus into Neo4j.
 2. **Declare.** Engineers describe an application's network path as YAML in git. A pull request triggers `promhash-loader -validate-only`, which resolves every device/interface reference against the catalog. Typos fail the PR.
 3. **Load.** On merge, `promhash-loader` writes the declaration into the graph with the commit SHA as provenance, closing the previous validity interval and opening a new one.
-4. **Query.** `promhash-api` answers path, interface, and impact questions for every application at zero Prometheus cost. The Grafana plugin and the alert proxy are its consumers.
+4. **Query.** `promhash-api` answers path, interface, and impact questions for every application at zero Prometheus cost. Grafana dashboards and the alert proxy are its consumers.
 5. **Enrich.** For the curated application set, `promhash-enrich` generates three GitOps artifacts under `_shared/`: the recording rules, the alerting rules, and the promhash Prometheus config. The mapping series itself is not a file; it is served live by `promhash-api` (see step 6), so only reviewable configuration travels through GitOps.
 6. **Project.** The main Prometheus remote-writes the raw `if*` counters (and `ALERTS`) to a dedicated promhash Prometheus, which scrapes the bounded mapping series live from `promhash-api` and evaluates the path-health rules once for all curated apps.
 7. **Serve.** The resulting `app:if_*` and `app:path_*` series are remote-written onward to long-term storage with a `tenant` label, ready for `sum by(app)`, SLOs, and alerting.
@@ -231,7 +231,7 @@ Three decisions shape the whole system:
 | Prometheus (promhash) | Rule evaluation for curated apps | A small dedicated instance started with `--web.enable-remote-write-receiver`; receives the raw counters from the main Prometheus |
 | Nautobot | Optional fallback | `instance` to device-name mapping, only for targets that carry no hostname-style label; unnecessary when `file_sd` target files stamp a `hostname` label |
 | ServiceNow | Planned (later feature) | CMDB seeding of applications and services; not needed for v1, declarations in git are the source |
-| Grafana 10.4+ | The datasource plugin | Enterprise supported |
+| Grafana (optional) | Dashboards over the HTTP API | Any JSON-over-HTTP datasource works (e.g. the Infinity plugin); see [Grafana dashboards](#grafana-dashboards) |
 | Docker or Podman | Demo and integration tests | The test suite spins up throwaway Neo4j containers |
 
 ---
@@ -371,7 +371,7 @@ See [Alert enrichment proxy](#alert-enrichment-proxy).
 
 ## HTTP API
 
-A small read-only surface over the graph, backed by Cypher. It is the single server-side entry point for the Grafana plugin, alert enrichment, and any other consumer. It returns JSON and adds no cardinality to Prometheus.
+A small read-only surface over the graph, backed by Cypher. It is the single server-side entry point for Grafana dashboards, alert enrichment, and any other consumer. It returns JSON and adds no cardinality to Prometheus.
 
 **Authentication.** Every data endpoint requires `Authorization: Bearer <token>`, compared in constant time against the configured token set. Only `/healthz`, `/readyz`, and `/metrics` are exempt, so probes and scrapes need no credentials. Requests without a valid token get `401`. The examples below omit the header for brevity.
 
@@ -466,29 +466,29 @@ Derived labels are applied to resolved alerts too, so the fingerprint matches an
 
 ---
 
-## Grafana datasource plugin
+## Grafana dashboards
 
-A Grafana datasource (`plugin/promhash-datasource`) that surfaces the graph through a query editor, template variables, and alerting. It is a thin adapter over the HTTP API; it does not talk to Neo4j directly, so all graph logic stays server-side.
+Grafana consumes the graph through the HTTP API with a generic JSON-over-HTTP datasource — no promhash-specific plugin to build, sign, or maintain. The [Infinity datasource](https://grafana.com/grafana/plugins/yesoreyeram-infinity-datasource/) is the recommended choice: it supports secure Bearer-token auth (the token is stored server-side in Grafana's `secureJsonData`, never sent to the browser), JSON responses as both template variables and table panels, and is broadly deployed.
 
-**Configuration:** the promhash API URL, plus the API token (stored in Grafana's `secureJsonData`: encrypted at rest, decrypted only for the backend plugin, never sent to the browser). The token must be one accepted by `promhash-api`; a wrong or missing token shows up as an explicit 401 message in the datasource health check.
+**Datasource configuration (Infinity):** set the base URL to the promhash API, choose *Bearer token* authentication, and paste a token accepted by `promhash-api`. Allow the API host under Infinity's allowed-hosts security setting.
 
-**Query types:**
+**Template variables** (Infinity query of type JSON, format *Variable*):
 
-- `app_path`: an application's ordered hops, for path-health panels.
-- `impact` / `interface_apps`: the applications affected by an interface.
+- App picker (`$app`): URL `/apps` — a JSON array of application names.
+- Interface selectors (`$iface`): URL `/apps/${app}/ifaces` — the deduplicated composite `instance:ifIndex` selectors for the selected app's path.
 
-**Variable queries** (type the query string into a Grafana variable of type *Query* backed by this datasource):
+**Table panels** (Infinity query of type JSON, format *Table*):
 
-- `apps`: populate an application picker (e.g. a variable named `app`).
-- `path_interfaces/$app`: the composite `instance:ifIndex` selector set for the selected application (backed by `GET /apps/{app}/ifaces`).
+- Path: URL `/apps/${app}/path` — one row per hop (`device`, `ifName`, `ifIndex`, `direction`).
+- Impact / blast radius: URL `/interface-apps?device=...&ifName=...`, rows under the `impact` field (`app`, `service`, `customer`, `owner`, `criticality`).
 
-**The zero-cardinality dashboard pattern.** For applications that are not projected into per-app series, a dashboard joins two datasources at query time: a plugin template variable supplies which interfaces an application crosses (populated via `path_interfaces/<app>`, each entry being the composite `iface` value `instance:ifIndex`), and a normal Prometheus panel queries the raw infrastructure metrics scoped to that set:
+**The zero-cardinality dashboard pattern.** For applications that are not projected into per-app series, a dashboard joins two datasources at query time: the `$iface` variable above supplies which interfaces an application crosses (each entry being the composite `iface` value `instance:ifIndex`), and a normal Prometheus panel queries the raw infrastructure metrics scoped to that set:
 
 ```promql
 rate(ifHCOutOctets{iface=~"$iface"}[5m])
 ```
 
-The application-to-interface mapping becomes a Grafana variable, never a label. Curated applications skip the plugin entirely and query their `app:` series directly with `sum by(app)`.
+The application-to-interface mapping becomes a Grafana variable, never a label. Curated applications skip this pattern entirely and query their `app:` series directly with `sum by(app)`.
 
 **Prerequisite.** The composite `iface` label must exist on the raw series, and it can only be synthesized at scrape time on the Prometheus the dashboard queries (remote-written samples cannot be relabeled at a receiver). Add to that Prometheus's SNMP scrape job:
 
@@ -501,8 +501,6 @@ metric_relabel_configs:
 
 If you cannot add this relabel to the main Prometheus, this pattern is unavailable; use the curated tier (`app:` series) for those applications instead.
 
-Build, signing, and deployment: see `plugin/promhash-datasource/README.md` (`make dist-plugin` from the repo root builds the deployable `dist/` directory).
-
 ---
 
 ## Enrichment and projection
@@ -511,7 +509,7 @@ promhash uses a shared-evaluator projection model. A single dedicated rule-evalu
 
 ### Three serving tiers
 
-**T0: free graph lookups (Grafana variables).** The graph answers path and impact queries for every application at zero Prometheus cost. The `path_interfaces/<app>` variable query returns the composite `iface` value (`instance:ifIndex`) for each hop; this drives the zero-cardinality dashboard pattern.
+**T0: free graph lookups (Grafana variables).** The graph answers path and impact queries for every application at zero Prometheus cost. `GET /apps/{app}/ifaces` returns the composite `iface` value (`instance:ifIndex`) for each hop; this drives the zero-cardinality dashboard pattern.
 
 **T1: bounded mapping series + path-health recording rules (the primary layer).**
 
@@ -627,7 +625,7 @@ See `docs/deploy/shared-evaluator.md` for the full deployment guide.
 curl -s "localhost:8080/interface-apps?device=rtr-core-1&ifName=tengige0/1/2" | jq
 ```
 
-**Build an app-path-health dashboard (no per-app series).** Add the promhash datasource; create a variable from `path_interfaces/$app`; in a Prometheus panel, filter the raw interface metrics by that variable.
+**Build an app-path-health dashboard (no per-app series).** Add a JSON API datasource (e.g. Infinity) pointed at `promhash-api`; create a variable from `GET /apps/${app}/ifaces`; in a Prometheus panel, filter the raw interface metrics by that variable (see [Grafana dashboards](#grafana-dashboards)).
 
 **Enrich an application into per-app metrics.** Add the application name to the `promhash-enrich -apps` list, run it, and let GitOps deploy the generated `_shared/` artifacts to the promhash Prometheus. Then query `app:if_egress_octets:rate5m{app="<app>"}`.
 
@@ -644,7 +642,7 @@ curl -s "localhost:8080/impact?device=rtr-core-1&ifName=tengige0/1/2&at=17000001
 
 ## Codebase reference
 
-A Go workspace: command entry points under `cmd/`, the libraries under `internal/`, and the Grafana plugin as a separate module under `plugin/`.
+A single Go module: command entry points under `cmd/` and the libraries under `internal/`.
 
 | Package | Responsibility | Key API |
 |---------|---------------|---------|
@@ -661,7 +659,6 @@ A Go workspace: command entry points under `cmd/`, the libraries under `internal
 | `internal/httpx` | Shared HTTP helpers: retrying client calls and the TLS/plain server helper used by the listeners. | `DoWithRetry`, `ListenAndServe`, `ValidateTLSFlags` |
 | `internal/testutil` | A Neo4j testcontainer helper used by the integration tests. | `Neo4j` |
 | `cmd/*` | The command-line entry points: `promhash-catalog`, `promhash-seed`, `promhash-loader`, `promhash-enrich`, `promhash-api`, `promhash-alert-proxy`, and the demo-only `promhash-demo-exporter`. | |
-| `plugin/promhash-datasource` | The Grafana datasource plugin (Go backend + React frontend). | `Datasource`, `NewDatasource`, `QueryData`, `CallResource`, `CheckHealth` |
 
 Browse the full per-package reference with Go's documentation tool:
 
@@ -679,7 +676,6 @@ make build        # build all packages
 make test         # unit tests (fast, no containers)
 make test-int     # integration tests (spin up Neo4j containers)
 make lint         # go vet
-make dist-plugin  # build the deployable Grafana plugin into plugin/.../dist/
 ```
 
 **Testing approach.** Pure logic (identity hashing, name canonicalization, reference resolution, selector and rule generation, HTTP handlers, PromQL rule behavior via the promqltest engine) is covered by fast unit tests with no external dependencies. Anything that touches Neo4j is covered by integration tests tagged `//go:build integration`, which start a throwaway Neo4j container per package. Those tests need a container engine:

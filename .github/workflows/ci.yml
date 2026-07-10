@@ -30,18 +30,6 @@ jobs:
       - name: Unit test (root module)
         run: go test ./...
 
-      - name: Build (plugin module)
-        working-directory: plugin/promhash-datasource
-        run: go build ./...
-
-      - name: Vet (plugin module)
-        working-directory: plugin/promhash-datasource
-        run: go vet ./...
-
-      - name: Unit test (plugin module)
-        working-directory: plugin/promhash-datasource
-        run: go test ./...
-
   integration:
     name: Integration test (Neo4j via testcontainers)
     runs-on: ubuntu-latest

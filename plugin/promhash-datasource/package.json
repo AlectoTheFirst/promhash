@@ -1,1 +1,0 @@
-{"name":"promhash-datasource","version":"0.1.0","scripts":{"build":"webpack --mode production"},"dependencies":{"@grafana/data":"^10.4.0","@grafana/runtime":"^10.4.0","@grafana/ui":"^10.4.0","react":"^18.2.0"},"devDependencies":{"copy-webpack-plugin":"^14.0.0","ts-loader":"^9.6.0","typescript":"^6.0.3","webpack":"^5.107.2","webpack-cli":"^7.0.3"}}
