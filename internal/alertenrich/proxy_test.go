@@ -1,6 +1,7 @@
 package alertenrich
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -281,5 +282,33 @@ func TestProxyResolvedKeepsLabelsDropsAnnotation(t *testing.T) {
 	}
 	if _, found := out[0]["annotations"].(map[string]any)["promhash_blast_radius"]; found {
 		t.Fatal("resolved annotation must be omitted when EnrichResolved is false")
+	}
+}
+
+func TestServeHTTPRejectsOversizedBody(t *testing.T) {
+	forwarded := false
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = true
+	}))
+	defer up.Close()
+
+	p := NewProxy(ProxyConfig{
+		Client:     fakeClient{},
+		Upstreams:  []string{up.URL},
+		LabelMap:   LabelMap{DeviceLabel: "instance", IfIndexLabel: "ifIndex", IfNameLabel: "ifName"},
+		Render:     RenderCfg{Prefix: "promhash_"},
+		Registerer: prometheus.NewRegistry(),
+	})
+
+	big := bytes.Repeat([]byte("a"), maxAlertBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewReader(big))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if forwarded {
+		t.Fatal("oversized batch must not be forwarded upstream")
 	}
 }
