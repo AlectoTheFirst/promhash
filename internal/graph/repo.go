@@ -580,17 +580,27 @@ func (r *Repo) ListOpenDeclaredApps(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// AppServiceName returns the name of the ApplicationService that the named
-// application runs as. If the application has no service or the lookup fails,
-// it falls back to returning app unchanged.
-func (r *Repo) AppServiceName(ctx context.Context, app string) (string, error) {
+// AppServiceNames returns app-name → service-name for every app in apps that
+// has a RUNS_AS service. Apps without one are absent from the map; callers
+// fall back to the app name. When an app has multiple RUNS_AS services the
+// last row wins (mirrors the LIMIT 1 of the former per-app lookup).
+func (r *Repo) AppServiceNames(ctx context.Context, apps []string) (map[string]string, error) {
 	res, err := neo4j.ExecuteQuery(ctx, r.drv,
-		`MATCH (:Application {name:$app})-[:RUNS_AS]->(s:ApplicationService) RETURN s.name AS n LIMIT 1`,
-		map[string]any{"app": app}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
-	if err != nil || len(res.Records) == 0 {
-		return app, err
+		`UNWIND $apps AS app
+	     MATCH (:Application {name:app})-[:RUNS_AS]->(s:ApplicationService)
+	     RETURN app, s.name AS svc`,
+		map[string]any{"apps": apps},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase(r.db))
+	if err != nil {
+		return nil, err
 	}
-	v, _ := res.Records[0].Get("n")
-	s, _ := v.(string)
-	return s, nil
+	out := make(map[string]string, len(res.Records))
+	for _, rec := range res.Records {
+		a, _ := rec.Get("app")
+		s, _ := rec.Get("svc")
+		app, _ := a.(string)
+		svc, _ := s.(string)
+		out[app] = svc
+	}
+	return out, nil
 }
