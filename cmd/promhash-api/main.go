@@ -27,12 +27,13 @@ func main() {
 }
 
 func run() error {
-	var addr, neoURL, neoUser, neoPass, tokenFile, tlsCert, tlsKey string
+	var addr, neoURL, neoUser, neoPass, neoDB, tokenFile, tlsCert, tlsKey string
 	var insecureNoAuth bool
 	flag.StringVar(&addr, "addr", "127.0.0.1:8080", "")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&neoDB, "neo4j-db", "neo4j", "Neo4j database name")
 	flag.StringVar(&tokenFile, "token-file", "", "file with one API bearer token per line (# comments allowed); alternative to PROMHASH_API_TOKENS")
 	flag.BoolVar(&insecureNoAuth, "insecure-no-auth", false, "serve the data endpoints WITHOUT authentication (explicit opt-out; dev only)")
 	flag.StringVar(&tlsCert, "tls-cert", "", "TLS certificate file; with -tls-key, serve HTTPS (TLS 1.2+)")
@@ -80,7 +81,7 @@ func run() error {
 		return err
 	}
 
-	var handler http.Handler = api.NewServer(graph.New(drv, "neo4j")).Mux()
+	var handler http.Handler = api.NewServer(graph.New(drv, neoDB)).Mux()
 	if len(tokens) > 0 {
 		handler = api.WithAuth(handler, tokens)
 	} else {

@@ -22,12 +22,13 @@ func main() {
 }
 
 func run() error {
-	var promURL, neoURL, neoUser, neoPass, nbURL, nbToken, vendor, deviceLabel string
+	var promURL, neoURL, neoUser, neoPass, neoDB, nbURL, nbToken, vendor, deviceLabel string
 	var timeout time.Duration
 	flag.StringVar(&promURL, "prometheus", "http://localhost:9090", "Prometheus base URL")
 	flag.StringVar(&neoURL, "neo4j", "bolt://localhost:7687", "Neo4j bolt URL")
 	flag.StringVar(&neoUser, "neo4j-user", "neo4j", "")
 	flag.StringVar(&neoPass, "neo4j-pass", "", "")
+	flag.StringVar(&neoDB, "neo4j-db", "neo4j", "Neo4j database name")
 	flag.StringVar(&nbURL, "nautobot", "", "Nautobot base URL")
 	flag.StringVar(&nbToken, "nautobot-token", "", "")
 	flag.StringVar(&vendor, "vendor", "cisco", "default vendor for canonicalization")
@@ -49,7 +50,7 @@ func run() error {
 	if err := drv.VerifyConnectivity(ctx); err != nil {
 		return err
 	}
-	r := graph.New(drv, "neo4j")
+	r := graph.New(drv, neoDB)
 	if err := r.EnsureConstraints(ctx); err != nil {
 		return err
 	}

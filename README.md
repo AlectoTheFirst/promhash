@@ -292,7 +292,7 @@ Interface references are validated against reality. On a pull request, `promhash
 
 ## Command-line tools
 
-All tools share the Neo4j connection flags `-neo4j` and `-neo4j-user`.
+All tools share the Neo4j connection flags `-neo4j`, `-neo4j-user`, and `-neo4j-db` (default `neo4j`).
 
 **Secrets.** To keep credentials out of process listings, each tool reads its secret from the environment: `NEO4J_PASS` (all tools), `NAUTOBOT_TOKEN` (`promhash-catalog`), `SERVICENOW_PASS` (`promhash-seed`), `PROMHASH_API_TOKENS` (`promhash-api`, the accepted Bearer tokens), and `PROMHASH_API_TOKEN` (`promhash-alert-proxy`, the token it presents). Always use the environment variables; never pass secrets as flags.
 
